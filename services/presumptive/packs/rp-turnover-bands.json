@@ -1,0 +1,21 @@
+{
+  "id": "rp-turnover-bands",
+  "version": "1.0.0",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "status": "published",
+  "subject_to_regazette": true,
+  "provenance": {
+    "as_passed": "Nigeria Tax Administration Act 2025 s.44(2) turnover banding for presumptive regime",
+    "as_gazetted": null,
+    "source_citation": "NRS Presumptive Turnover Banding Circular 2026/01"
+  },
+  "rules": {
+    "bands": [
+      { "id": "micro",  "label": "Micro (up to N1,000,000)",      "min_kobo": 0,          "max_kobo": 100000000 },
+      { "id": "small",  "label": "Small (N1m - N5m)",             "min_kobo": 100000001,  "max_kobo": 500000000 },
+      { "id": "medium", "label": "Medium (N5m - N25m)",           "min_kobo": 500000001,  "max_kobo": 2500000000 },
+      { "id": "above_ceiling", "label": "Above presumptive ceiling (graduate to standard regime)", "min_kobo": 2500000001, "max_kobo": null, "graduate": true }
+    ]
+  }
+}

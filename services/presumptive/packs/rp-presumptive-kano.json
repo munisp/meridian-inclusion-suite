@@ -1,0 +1,22 @@
+{
+  "id": "rp-presumptive-kano",
+  "version": "1.0.0",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "status": "published",
+  "subject_to_regazette": true,
+  "provenance": {
+    "as_passed": "Nigeria Tax Administration Act 2025 s.44; Kano State Revenue (Consolidation) Law informal sector schedule",
+    "as_gazetted": null,
+    "source_citation": "Kano State Informal Sector Presumptive Levy Schedule 2026 (KIRS)"
+  },
+  "rules": {
+    "levy_table_annual_kobo": {
+      "micro":  { "default": 200000, "food_vendor": 150000, "tailoring": 200000, "artisan": 250000, "transport": 300000, "retail": 200000, "services": 200000 },
+      "small":  { "default": 700000, "food_vendor": 600000, "tailoring": 700000, "artisan": 800000, "transport": 1000000, "retail": 750000, "services": 700000 },
+      "medium": { "default": 1800000, "food_vendor": 1500000, "tailoring": 1800000, "artisan": 2000000, "transport": 2500000, "retail": 1900000, "services": 1800000 }
+    },
+    "admin_fee_kobo": 3000,
+    "narrate": "Kano KIRS presumptive levy schedule (annual, by turnover band x trade category)"
+  }
+}

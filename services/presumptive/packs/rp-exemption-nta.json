@@ -1,0 +1,27 @@
+{
+  "id": "rp-exemption-nta",
+  "version": "1.0.0",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "status": "published",
+  "subject_to_regazette": true,
+  "provenance": {
+    "as_passed": "Nigeria Tax Act 2025 First Schedule (persons below the tax-free threshold); NTA 2025 s.163 small-company relief",
+    "as_gazetted": null,
+    "source_citation": "Nigeria Tax Act 2025 - exemptions relevant to the presumptive regime"
+  },
+  "rules": {
+    "exemptions": [
+      {
+        "id": "pit_tax_free_threshold",
+        "when": { "annual_turnover_below_kobo": 80000000 },
+        "then": { "exempt": true, "reason": "Annual income below the N800,000 tax-free threshold (NTA 2025 First Schedule) - presumptive levy not applicable" }
+      },
+      {
+        "id": "small_company_relief",
+        "when": { "annual_turnover_below_kobo": 10000000000, "fixed_assets_below_kobo": 25000000000, "is_company": true },
+        "then": { "exempt": true, "reason": "Small company (turnover <= N100m, fixed assets <= N250m) is exempt from CIT under NTA 2025 - route to standard regime at 0%" }
+      }
+    ]
+  }
+}

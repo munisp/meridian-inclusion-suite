@@ -1,0 +1,22 @@
+{
+  "id": "rp-presumptive-federal",
+  "version": "1.0.0",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "status": "published",
+  "subject_to_regazette": true,
+  "provenance": {
+    "as_passed": "Nigeria Tax Administration Act 2025 s.44 (presumptive taxation of the informal sector)",
+    "as_gazetted": null,
+    "source_citation": "NRS Informal Sector Presumptive Levy Schedule (federal baseline) 2026"
+  },
+  "rules": {
+    "levy_table_annual_kobo": {
+      "micro":  { "default": 300000, "food_vendor": 250000, "tailoring": 300000, "artisan": 350000, "transport": 400000, "retail": 300000, "services": 300000 },
+      "small":  { "default": 1000000, "food_vendor": 800000, "tailoring": 1000000, "artisan": 1200000, "transport": 1500000, "retail": 1100000, "services": 1000000 },
+      "medium": { "default": 2500000, "food_vendor": 2000000, "tailoring": 2500000, "artisan": 3000000, "transport": 3500000, "retail": 2800000, "services": 2600000 }
+    },
+    "admin_fee_kobo": 5000,
+    "narrate": "Federal presumptive levy schedule for informal-sector operators (annual, by turnover band x trade category)"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "rp-presumptive-lagos",
+  "version": "1.0.0",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "status": "published",
+  "subject_to_regazette": true,
+  "provenance": {
+    "as_passed": "Nigeria Tax Administration Act 2025 s.44; LIRS informal sector levy harmonisation",
+    "as_gazetted": null,
+    "source_citation": "Lagos State Informal Sector Presumptive Levy Schedule 2026 (LIRS)"
+  },
+  "rules": {
+    "levy_table_annual_kobo": {
+      "micro":  { "default": 500000, "food_vendor": 400000, "tailoring": 500000, "artisan": 600000, "transport": 700000, "retail": 500000, "services": 500000 },
+      "small":  { "default": 1500000, "food_vendor": 1200000, "tailoring": 1500000, "artisan": 1800000, "transport": 2000000, "retail": 1600000, "services": 1500000 },
+      "medium": { "default": 3500000, "food_vendor": 3000000, "tailoring": 3500000, "artisan": 4000000, "transport": 4800000, "retail": 3800000, "services": 3600000 }
+    },
+    "admin_fee_kobo": 10000,
+    "narrate": "Lagos LIRS presumptive levy schedule (annual, by turnover band x trade category)"
+  }
+}
