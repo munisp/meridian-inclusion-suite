@@ -1,0 +1,17 @@
+{
+  "name": "Meridian Operator Self-Service",
+  "short_name": "Operator",
+  "description": "Self-service for informal-sector operators: band view, levy payment, certificates, tax education",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#faf7f2",
+  "theme_color": "#6f5830",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
