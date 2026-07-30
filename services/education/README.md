@@ -30,3 +30,11 @@ pytest tests/ -q    # 18 tests
 
 Honesty tags: pack is `subject_to_regazette` (NTA 2025 figures as passed, may
 change on gazetting). Chat is retrieval/template-based (no generative model).
+
+## Prod profile
+
+The service has no privileged endpoints (calculators/FAQ/chat are public
+educational content) and stores no PII, so the H1 prod vars are optional:
+`PORT` (default 8103) is the only env it consumes. Auth, when the
+enclave-gateway fronts it, is enforced at the gateway (Keycloak RS256,
+`AUTH_MODE=keycloak` on the Go services).
