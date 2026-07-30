@@ -1,0 +1,12 @@
+# Multi-service Go image. Build with: docker build -f Dockerfile.go-service --build-arg SERVICE=onboarding .
+FROM golang:1.22-bookworm AS build
+ARG SERVICE
+WORKDIR /src
+COPY go.mod ./
+COPY internal ./internal
+COPY services/${SERVICE} ./services/${SERVICE}
+RUN CGO_ENABLED=0 go build -o /bin/svc ./services/${SERVICE}
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /bin/svc /svc
+ENTRYPOINT ["/svc"]

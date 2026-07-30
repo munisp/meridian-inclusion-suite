@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+gates.dev.json
+*.tmp

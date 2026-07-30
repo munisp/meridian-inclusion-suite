@@ -1,0 +1,46 @@
+# Optional convenience runner. Every service also runs standalone (see README).
+services:
+  onboarding:
+    build:
+      context: .
+      dockerfile: Dockerfile.go-service
+      args: { SERVICE: onboarding }
+    ports: ["8101:8101"]
+    environment:
+      PORT: "8101"
+    # TIN_GRAPH_URL / CONSENT_URL / LEDGER_URL / NIMC_URL: set to core services when available
+
+  presumptive:
+    build:
+      context: .
+      dockerfile: Dockerfile.go-service
+      args: { SERVICE: presumptive }
+    ports: ["8102:8102"]
+    environment:
+      PORT: "8102"
+    # REG_WATCH_URL / LEDGER_URL: set to core services when available
+
+  education:
+    build: ./services/education
+    ports: ["8103:8103"]
+    environment:
+      PORT: "8103"
+
+  ussd-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.go-service
+      args: { SERVICE: ussd-gateway }
+    ports: ["8104:8104"]
+    environment:
+      PORT: "8104"
+      ONBOARDING_URL: http://onboarding:8101
+      PRESUMPTIVE_URL: http://presumptive:8102
+
+  agent-pwa:
+    build: ./apps/agent-pwa
+    ports: ["5201:8080"]
+
+  operator-pwa:
+    build: ./apps/operator-pwa
+    ports: ["5202:8080"]
