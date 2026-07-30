@@ -12,11 +12,11 @@ import (
 )
 
 func main() {
-	st, err := store.OpenFromEnv()
+	st, err := store.OpenFromEnvProfile()
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
-	bus := events.NewInprocBus()
+	bus := events.NewBusFromEnv(serviceName)
 	reg := NewRegistry(st)
 	verifier := NewNINVerifierFromEnv()
 	provisioner := NewTINProvisionerFromEnv()
