@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,11 +21,12 @@ func (b busAdapter) Publish(topic string, data map[string]any) {
 }
 
 type server struct {
-	graph  *MenuGraph
-	engine *Engine
-	store  SessionStore
-	bus    events.Bus
-	mu     sync.Mutex // serialize per-session processing in dev
+	graph    *MenuGraph
+	engine   *Engine
+	store    SessionStore
+	bus      events.Bus
+	notifier *AggregatorNotifier // nil in dev (USSD_AGGREGATOR_URL unset)
+	mu       sync.Mutex          // serialize per-session processing in dev
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -83,13 +86,24 @@ func prefix(text string, cont bool) string {
 // form fields sessionId, serviceCode, phoneNumber, text (cumulative, '*'-
 // separated). Responds text/plain with CON/END.
 func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	// Read the raw body first for aggregator HMAC verification (H4).
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if !VerifyAggregatorSignature(r.Header.Get("X-Aggregator-Signature"), raw) {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "unauthorized", "invalid aggregator signature")
+		return
+	}
+	form, err := url.ParseQuery(string(raw))
+	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_form", err.Error())
 		return
 	}
-	sessionID := r.FormValue("sessionId")
-	phone := r.FormValue("phoneNumber")
-	text := r.FormValue("text")
+	sessionID := form.Get("sessionId")
+	phone := form.Get("phoneNumber")
+	text := form.Get("text")
 	if sessionID == "" {
 		httpx.WriteProblem(w, http.StatusBadRequest, "validation", "sessionId is required")
 		return
@@ -125,6 +139,10 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 			s.store.Put(sess2)
 		}
 		s.mu.Unlock()
+	}
+	// Outbound aggregator notify on session end (prod profile only).
+	if s.notifier != nil && strings.HasPrefix(resp, "END ") {
+		go func() { _ = s.notifier.Notify(sessionID, phone, resp) }()
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
