@@ -7,9 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/authx"
 )
 
 // Problem is an RFC7807 problem+json body.
@@ -120,10 +123,16 @@ func validateHS256(token string) (map[string]any, bool) {
 	return claims, true
 }
 
-// Auth implements §1.3 auth: when AUTH_MODE=dev (default) accepts
+// Auth implements §1.3 auth. When AUTH_MODE=keycloak it delegates to the
+// authx RS256/JWKS verifier (H2); otherwise (AUTH_MODE=dev, default) accepts
 // X-Dev-Role: admin|operator|auditor OR a Bearer HS256 dev JWT.
 // Public paths (healthz/readyz and explicitly public routes) bypass it.
 func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
+	if os.Getenv("AUTH_MODE") == "keycloak" {
+		log.Printf("profile=prod component=auth (keycloak issuer=%s)", os.Getenv("KEYCLOAK_ISSUER"))
+		return authx.Middleware(authx.NewVerifier(authx.ConfigFromEnv()), publicPath)
+	}
+	log.Printf("profile=dev component=auth")
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if publicPath != nil && publicPath(r.URL.Path) {

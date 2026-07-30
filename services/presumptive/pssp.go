@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -108,12 +109,23 @@ func (s *psspSim) Void(reference string) error {
 // PSSPHub routes to provider adapters.
 type PSSPHub struct{ adapters map[string]PSSPAdapter }
 
+// NewPSSPHub wires provider adapters per H1: PSSP_API_URL set → the real
+// signed HTTP adapter is registered as provider "pssp" (profile=prod);
+// the deterministic provider simulators always remain available for dev
+// and for side-by-side testing.
 func NewPSSPHub() *PSSPHub {
-	return &PSSPHub{adapters: map[string]PSSPAdapter{
+	adapters := map[string]PSSPAdapter{
 		"remita":      newPSSPSim("remita", "RRR-%s", 100),      // 1.00% fee
 		"etranzact":   newPSSPSim("etranzact", "ETZ-%s", 75),    // 0.75%
 		"flutterwave": newPSSPSim("flutterwave", "FLW-%s", 140), // 1.40%
-	}}
+	}
+	if u := os.Getenv("PSSP_API_URL"); u != "" {
+		log.Printf("profile=prod component=pssp-adapter url=%s", u)
+		adapters["pssp"] = NewPSSPHTTPAdapter(u, os.Getenv("PSSP_API_KEY"))
+	} else {
+		log.Printf("profile=dev component=pssp-adapter (simulators)")
+	}
+	return &PSSPHub{adapters: adapters}
 }
 
 func (h *PSSPHub) Adapter(provider string) (PSSPAdapter, error) {
@@ -124,12 +136,23 @@ func (h *PSSPHub) Adapter(provider string) (PSSPAdapter, error) {
 	return a, nil
 }
 
-// webhookSecret is the shared secret for PSSP webhook HMAC signatures (dev).
+// webhookSecret is the shared secret for PSSP webhook HMAC signatures:
+// PSSP_API_KEY (prod) → PSSP_WEBHOOK_SECRET → dev default.
 func webhookSecret() string {
+	if s := os.Getenv("PSSP_API_KEY"); s != "" {
+		return s
+	}
 	if s := os.Getenv("PSSP_WEBHOOK_SECRET"); s != "" {
 		return s
 	}
 	return "meridian-dev-pssp-webhook-secret"
+}
+
+// hmacHex computes hex HMAC-SHA256(key, value).
+func hmacHex(key, value string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // VerifyWebhookSignature validates X-PSSP-Signature: hex HMAC-SHA256(secret, body).
@@ -137,8 +160,6 @@ func VerifyWebhookSignature(signature string, body []byte) bool {
 	if signature == "" {
 		return false
 	}
-	mac := hmac.New(sha256.New, []byte(webhookSecret()))
-	mac.Write(body)
-	want := hex.EncodeToString(mac.Sum(nil))
+	want := hmacHex(webhookSecret(), string(body))
 	return hmac.Equal([]byte(strings.ToLower(signature)), []byte(want))
 }

@@ -8,12 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Store struct {
 	mu   sync.RWMutex
 	path string
 	data map[string]map[string]json.RawMessage
+	pool *pgxpool.Pool // non-nil => Postgres backend (DATABASE_URL, see pg.go)
 }
 
 // Open loads (or creates) a JSON file store. path "" => in-memory only.
@@ -59,6 +62,9 @@ func (s *Store) persistLocked() error {
 }
 
 func (s *Store) Put(coll, id string, v any) error {
+	if s.pool != nil {
+		return s.pgPut(coll, id, v)
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -73,6 +79,9 @@ func (s *Store) Put(coll, id string, v any) error {
 }
 
 func (s *Store) Get(coll, id string, v any) (bool, error) {
+	if s.pool != nil {
+		return s.pgGet(coll, id, v)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	raw, ok := s.data[coll][id]
@@ -84,6 +93,9 @@ func (s *Store) Get(coll, id string, v any) (bool, error) {
 
 // Delete removes a record; returns false if absent.
 func (s *Store) Delete(coll, id string) (bool, error) {
+	if s.pool != nil {
+		return s.pgDelete(coll, id)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.data[coll][id]; !ok {
@@ -96,6 +108,9 @@ func (s *Store) Delete(coll, id string) (bool, error) {
 // List decodes every record in a collection into out, which must be a
 // pointer to a slice of the element type.
 func (s *Store) List(coll string, out any) error {
+	if s.pool != nil {
+		return s.pgList(coll, out)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var raws []json.RawMessage
@@ -111,6 +126,9 @@ func (s *Store) List(coll string, out any) error {
 
 // Count returns the number of records in a collection.
 func (s *Store) Count(coll string) int {
+	if s.pool != nil {
+		return s.pgCount(coll)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.data[coll])

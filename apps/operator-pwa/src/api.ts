@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { getAccessToken } from './auth'
 
 export const PRESUMPTIVE_URL = (import.meta.env.VITE_PRESUMPTIVE_URL as string) || 'http://localhost:8102'
 export const EDUCATION_URL = (import.meta.env.VITE_EDUCATION_URL as string) || 'http://localhost:8103'
@@ -10,7 +11,13 @@ export const onboardingApi = axios.create({ baseURL: ONBOARDING_URL, timeout: 15
 
 for (const api of [presumptiveApi, onboardingApi]) {
   api.interceptors.request.use((cfg) => {
-    cfg.headers['X-Dev-Role'] = 'operator'
+    // Prod (VITE_AUTH_MODE=keycloak): RS256 Bearer token; dev: §1.3 dev auth
+    const token = getAccessToken()
+    if (token) {
+      cfg.headers['Authorization'] = `Bearer ${token}`
+    } else {
+      cfg.headers['X-Dev-Role'] = 'operator'
+    }
     return cfg
   })
 }
