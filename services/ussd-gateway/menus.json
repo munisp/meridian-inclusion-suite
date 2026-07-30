@@ -1,0 +1,163 @@
+{
+  "service_code": "*347*88#",
+  "start": "home",
+  "session_ttl_seconds": 180,
+  "menus": {
+    "home": {
+      "type": "options",
+      "text": "Welcome to NRS Tax Services\n1. Register (Onboarding)\n2. TIN provision status\n3. Pay presumptive levy\n4. Verify certificate",
+      "options": [
+        { "key": "1", "next": "onb_nin" },
+        { "key": "2", "next": "onb_tin_input" },
+        { "key": "3", "next": "psm_state" },
+        { "key": "4", "next": "cert_input" }
+      ]
+    },
+    "onb_nin": {
+      "type": "input",
+      "text": "Enter your 11-digit NIN:",
+      "save_as": "nin",
+      "validate": "^\\d{11}$",
+      "invalid_text": "Invalid NIN. Enter exactly 11 digits:",
+      "next": "onb_name"
+    },
+    "onb_name": {
+      "type": "input",
+      "text": "Enter your full name:",
+      "save_as": "name",
+      "validate": "^[A-Za-z' -]{3,60}$",
+      "invalid_text": "Enter a valid full name (letters only, 3-60 chars):",
+      "next": "onb_state"
+    },
+    "onb_state": {
+      "type": "options",
+      "text": "Select your state:\n1. Lagos\n2. Kano\n3. Other",
+      "options": [
+        { "key": "1", "next": "onb_register", "set": { "state": "Lagos" } },
+        { "key": "2", "next": "onb_register", "set": { "state": "Kano" } },
+        { "key": "3", "next": "onb_register", "set": { "state": "Federal" } }
+      ]
+    },
+    "onb_register": {
+      "type": "action",
+      "action": "onb.register",
+      "next": "onb_done",
+      "error_next": "onb_error"
+    },
+    "onb_done": {
+      "type": "end",
+      "text": "Registration successful, {{name}}.\nYour TIN: {{tin}}\nStatus: NIN verified, TIN provisioned.\nKeep your TIN safe."
+    },
+    "onb_error": {
+      "type": "end",
+      "text": "Registration failed: {{error}}\nPlease try again or visit an NRS agent."
+    },
+    "onb_tin_input": {
+      "type": "input",
+      "text": "Enter your 11-digit NIN to check TIN status:",
+      "save_as": "nin",
+      "validate": "^\\d{11}$",
+      "invalid_text": "Invalid NIN. Enter exactly 11 digits:",
+      "next": "onb_tin_status"
+    },
+    "onb_tin_status": {
+      "type": "action",
+      "action": "onb.tin_status",
+      "next": "onb_tin_done",
+      "error_next": "onb_error"
+    },
+    "onb_tin_done": {
+      "type": "end",
+      "text": "TIN status for NIN {{nin_masked}}:\nTIN: {{tin}}\nStatus: {{tin_status}}"
+    },
+    "psm_state": {
+      "type": "options",
+      "text": "Presumptive levy - select state:\n1. Lagos\n2. Kano\n3. Other (federal schedule)",
+      "options": [
+        { "key": "1", "next": "psm_trade", "set": { "state": "Lagos" } },
+        { "key": "2", "next": "psm_trade", "set": { "state": "Kano" } },
+        { "key": "3", "next": "psm_trade", "set": { "state": "Federal" } }
+      ]
+    },
+    "psm_trade": {
+      "type": "options",
+      "text": "Select your trade:\n1. Food vendor\n2. Tailoring\n3. Artisan\n4. Transport\n5. Retail\n6. Services",
+      "options": [
+        { "key": "1", "next": "psm_turnover", "set": { "trade": "food_vendor" } },
+        { "key": "2", "next": "psm_turnover", "set": { "trade": "tailoring" } },
+        { "key": "3", "next": "psm_turnover", "set": { "trade": "artisan" } },
+        { "key": "4", "next": "psm_turnover", "set": { "trade": "transport" } },
+        { "key": "5", "next": "psm_turnover", "set": { "trade": "retail" } },
+        { "key": "6", "next": "psm_turnover", "set": { "trade": "services" } }
+      ]
+    },
+    "psm_turnover": {
+      "type": "options",
+      "text": "Annual turnover:\n1. Up to N800,000\n2. N800,001 - N1,000,000\n3. N1m - N5m\n4. N5m - N25m",
+      "options": [
+        { "key": "1", "next": "psm_band", "set": { "turnover_kobo": "50000000" } },
+        { "key": "2", "next": "psm_band", "set": { "turnover_kobo": "90000000" } },
+        { "key": "3", "next": "psm_band", "set": { "turnover_kobo": "300000000" } },
+        { "key": "4", "next": "psm_band", "set": { "turnover_kobo": "1500000000" } }
+      ]
+    },
+    "psm_band": {
+      "type": "action",
+      "action": "psm.band_lookup",
+      "next": "psm_pay_confirm",
+      "error_next": "psm_exempt"
+    },
+    "psm_exempt": {
+      "type": "end",
+      "text": "{{error}}\nNo payment is due. Thank you."
+    },
+    "psm_pay_confirm": {
+      "type": "options",
+      "text": "Band: {{band}}\nAnnual levy: N{{levy_naira}} (incl. admin fee N{{fee_naira}})\n1. Pay now\n2. Cancel",
+      "options": [
+        { "key": "1", "next": "psm_pay" },
+        { "key": "2", "next": "psm_cancel" }
+      ]
+    },
+    "psm_cancel": {
+      "type": "end",
+      "text": "Payment cancelled. Dial *347*88# anytime to restart."
+    },
+    "psm_pay": {
+      "type": "action",
+      "action": "psm.pay",
+      "next": "psm_pay_done",
+      "error_next": "psm_pay_error"
+    },
+    "psm_pay_done": {
+      "type": "end",
+      "text": "Payment of N{{levy_naira}} received (ref {{pssp_ref}}).\nCertificate: {{cert_serial}}\nYou will receive an SMS with your certificate serial.\nVerify at /v1/certificates/verify/{{cert_serial}}"
+    },
+    "psm_pay_error": {
+      "type": "end",
+      "text": "Payment failed: {{error}}\nNo charge was made. Please try again."
+    },
+    "cert_input": {
+      "type": "input",
+      "text": "Enter certificate serial (PSM-YYYY-XXXXXXXXXX):",
+      "save_as": "serial",
+      "validate": "^PSM-\\d{4}-[0-9A-Z]{6,12}$",
+      "invalid_text": "Invalid serial format. Try again:",
+      "next": "cert_verify"
+    },
+    "cert_verify": {
+      "type": "action",
+      "action": "psm.cert_verify",
+      "next": "cert_done",
+      "error_next": "cert_bad"
+    },
+    "cert_done": {
+      "type": "end",
+      "text": "Certificate {{serial}} is VALID.\nBand: {{cert_band}}\nAmount: N{{cert_amount_naira}}\nPeriod: {{cert_period}}"
+    },
+    "cert_bad": {
+      "type": "end",
+      "text": "Certificate {{serial}} could not be verified: {{error}}"
+    }
+  }
+}
