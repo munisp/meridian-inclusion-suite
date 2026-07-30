@@ -1,0 +1,53 @@
+id: rp-education-ng
+version: 1.0.0
+effective_from: 2026-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "Nigeria Tax Act 2025 (NTA); Nigeria Tax Administration Act 2025 (NTAA); Deduction of Tax at Source (WHT) Regulations 2024"
+  as_gazetted: null
+  source_citation: "Nigeria Tax Act 2025 - effective-dated rate tables for taxpayer education"
+signed: { algorithm: ed25519, key_id: governance-board-2026, signature: "dev-unsigned-education-pack" }
+rules:
+  - id: pit.bands.2026
+    kind: band_table
+    citation: "NTA 2025 s.58 & Fourth Schedule (personal income tax rates)"
+    bands:
+      - { up_to_kobo: 80000000, rate_bps: 0, narrate: "First N800,000 at 0% (tax-free threshold)" }
+      - { up_to_kobo: 300000000, rate_bps: 1500, narrate: "Next N2,200,000 at 15%" }
+      - { up_to_kobo: 1200000000, rate_bps: 1800, narrate: "Next N9,000,000 at 18%" }
+      - { up_to_kobo: 2500000000, rate_bps: 2100, narrate: "Next N13,000,000 at 21%" }
+      - { up_to_kobo: 5000000000, rate_bps: 2300, narrate: "Next N25,000,000 at 23%" }
+      - { up_to_kobo: null, rate_bps: 2500, narrate: "Above N50,000,000 at 25%" }
+  - id: pit.rent_relief.2026
+    kind: formula
+    citation: "NTA 2025 s.30 (rent relief: 20% of annual rent paid, capped at N500,000)"
+    rate_bps: 2000
+    cap_kobo: 50000000
+  - id: cit.standard.2026
+    kind: rate_bps
+    citation: "NTA 2025 s.56 (companies income tax rate 30%)"
+    rate_bps: 3000
+  - id: cit.small_company.2026
+    kind: threshold
+    citation: "NTA 2025 s.163 (small company: turnover <= N100m and total fixed assets <= N250m -> 0% CIT)"
+    turnover_ceiling_kobo: 10000000000
+    fixed_assets_ceiling_kobo: 25000000000
+    small_company_rate_bps: 0
+  - id: vat.standard.2026
+    kind: rate_bps
+    citation: "NTA 2025 s.146 (value added tax rate 7.5%)"
+    rate_bps: 750
+  - id: wht.quick.2024
+    kind: decision_table
+    citation: "Deduction of Tax at Source (Withholding) Regulations 2024"
+    small_transaction_carveout_kobo: 200000000
+    rates:
+      dividend: { rate_bps: 1000, narrate: "WHT 10% on dividends" }
+      interest: { rate_bps: 1000, narrate: "WHT 10% on interest" }
+      rent: { rate_bps: 1000, narrate: "WHT 10% on rent" }
+      royalty: { rate_bps: 500, narrate: "WHT 5% on royalties" }
+      services: { rate_bps: 500, narrate: "WHT 5% on services/professional fees" }
+      goods: { rate_bps: 200, narrate: "WHT 2% on goods/supplies" }
+      commission: { rate_bps: 500, narrate: "WHT 5% on commission" }
