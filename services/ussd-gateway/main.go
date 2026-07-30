@@ -14,11 +14,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("menu graph: %v", err)
 	}
-	bus := events.NewInprocBus()
+	bus := events.NewBusFromEnv(serviceName)
 	engine := NewEngine(graph, RegisterActions(busAdapter{bus: bus}))
 	store := NewInMemSessionStore(graph.SessionTTLSeconds)
 
-	srv := &server{graph: graph, engine: engine, store: store, bus: bus}
+	srv := &server{graph: graph, engine: engine, store: store, bus: bus, notifier: NewAggregatorNotifierFromEnv()}
 
 	port := os.Getenv("PORT")
 	if port == "" {
