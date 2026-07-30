@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main, hardening/prod]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test (race)
+        run: go test -race ./...
+
+  education:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/education
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: deps
+        run: pip install -r requirements.txt pytest httpx
+      - name: pytest
+        run: python -m pytest tests/ -q
+
+  pwas:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [agent-pwa, operator-pwa]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install
+        run: npm ci
+      - name: typecheck + build
+        run: npm run build
