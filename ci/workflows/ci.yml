@@ -53,6 +53,6 @@ jobs:
         with:
           node-version: '20'
       - name: install
-        run: npm ci
+        run: npm install
       - name: typecheck + build
         run: npm run build
