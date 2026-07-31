@@ -41,7 +41,10 @@ type CaptureResponse struct {
 type PSSPAdapter interface {
 	Name() string
 	Authorise(req AuthoriseRequest) (AuthoriseResponse, error)
-	Capture(reference string, amountKobo uint64) (CaptureResponse, error)
+	// Capture settles an authorisation. idempotencyKey dedupes retries at
+	// the provider: a replayed key returns the original capture result
+	// instead of a second charge.
+	Capture(reference string, amountKobo uint64, idempotencyKey string) (CaptureResponse, error)
 	Void(reference string) error
 	// Refund reverses a settled capture (saga compensation).
 	Refund(reference string, amountKobo uint64) error
@@ -57,10 +60,11 @@ type psspSim struct {
 	mu      sync.Mutex
 	authed  map[string]uint64 // reference -> amount
 	settled map[string]bool
+	capKeys map[string]string // reference -> idempotency key used at capture
 }
 
 func newPSSPSim(name, refFmt string, feeBps uint64) *psspSim {
-	return &psspSim{name: name, refFmt: refFmt, feeBps: feeBps, authed: map[string]uint64{}, settled: map[string]bool{}}
+	return &psspSim{name: name, refFmt: refFmt, feeBps: feeBps, authed: map[string]uint64{}, settled: map[string]bool{}, capKeys: map[string]string{}}
 }
 
 func (s *psspSim) Name() string { return s.name }
@@ -80,9 +84,22 @@ func (s *psspSim) Authorise(req AuthoriseRequest) (AuthoriseResponse, error) {
 	return AuthoriseResponse{Reference: ref, Status: "authorised", Detail: s.name + " simulator authorisation"}, nil
 }
 
-func (s *psspSim) Capture(reference string, amountKobo uint64) (CaptureResponse, error) {
+func (s *psspSim) Capture(reference string, amountKobo uint64, idempotencyKey string) (CaptureResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.settled[reference] {
+		// Idempotent replay: same key => return the original capture result
+		// (real providers do this via their Idempotency-Key support).
+		if idempotencyKey != "" && s.capKeys[reference] == idempotencyKey {
+			amt := amountKobo
+			if amt == 0 {
+				amt = 1 // unknown original; caller always passes the amount
+			}
+			fee := amt * s.feeBps / 10000
+			return CaptureResponse{Reference: reference, Status: "captured", SettledKobo: amt - fee, Detail: s.name + " idempotent replay"}, nil
+		}
+		return CaptureResponse{Reference: reference, Status: "failed", Detail: "already captured"}, nil
+	}
 	amt, ok := s.authed[reference]
 	if !ok {
 		return CaptureResponse{Reference: reference, Status: "failed", Detail: "unknown or expired authorisation"}, nil
@@ -90,11 +107,9 @@ func (s *psspSim) Capture(reference string, amountKobo uint64) (CaptureResponse,
 	if amountKobo == 0 || amountKobo > amt {
 		amountKobo = amt
 	}
-	if s.settled[reference] {
-		return CaptureResponse{Reference: reference, Status: "failed", Detail: "already captured"}, nil
-	}
 	fee := amountKobo * s.feeBps / 10000
 	s.settled[reference] = true
+	s.capKeys[reference] = idempotencyKey
 	delete(s.authed, reference)
 	return CaptureResponse{Reference: reference, Status: "captured", SettledKobo: amountKobo - fee, Detail: fmt.Sprintf("%s fee %d kobo (%d bps)", s.name, fee, s.feeBps)}, nil
 }
