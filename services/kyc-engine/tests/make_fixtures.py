@@ -15,9 +15,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, PngImagePlugin
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kyc_engine.pipeline.stage_fields import rc_checksum_digit  # noqa: E402
-
 FIX = Path(__file__).parent / "fixtures"
 
 
@@ -79,8 +76,8 @@ def cac_cert(rc: str = "RC1234562", conf: float = 0.95, seed: int = 2,
 
 
 def valid_rc(body6: str) -> str:
-    """Build an RC number whose mod-11 check digit validates."""
-    return "RC" + body6 + rc_checksum_digit(body6)
+    """Build a standard-format RC number (no checksum exists on CAC numbers)."""
+    return "RC" + body6
 
 
 def face_pair(match: bool = True, seed: int = 10) -> tuple[bytes, bytes]:

@@ -24,22 +24,35 @@ def nin_format_valid(nin: str) -> bool:
     return True
 
 
-def rc_checksum_digit(body: str) -> str:
-    """RC check digit: weighted mod-11 over the numeric body (digits only).
-    Used by the CAC format check `rc_checksum_ok` and by the fixture
-    generator; mirrors the checksum position on modern CAC certificates."""
-    weights = [2, 3, 4, 5, 6, 7]
-    total = sum(int(d) * weights[i % len(weights)] for i, d in enumerate(reversed(body)))
-    return str((11 - (total % 11)) % 10)
+# CAC registration-number formats (no checksum is published by CAC — RC/BN/IT
+# numbers are sequential registry identifiers, so format-only validation is
+# the defensible stance; truth is delegated to the registry cross-check).
+#   RC######  companies (registered companies)
+#   BN######  business names
+#   IT######  incorporated trustees
+CAC_NUMBER_RE = re.compile(r"^(RC|BN|IT)(\d{5,8})$", re.IGNORECASE)
+# Older certificates carry free-format numbers; accept them (never false-reject)
+# and flag as legacy so downstream can note the weaker format signal.
+_LEGACY_NUMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ./-]{2,31}$")
+
+
+def cac_number_kind(rc: str) -> Optional[str]:
+    """'RC' | 'BN' | 'IT' | 'legacy' | None (empty/unusable)."""
+    if not rc or not rc.strip():
+        return None
+    m = CAC_NUMBER_RE.fullmatch(rc.strip())
+    if m:
+        return m.group(1).upper()
+    if _LEGACY_NUMBER_RE.fullmatch(rc.strip()):
+        return "legacy"
+    return None
 
 
 def rc_format_valid(rc: str) -> bool:
-    """RC number: 'RC' + 6-7 digits, last digit is the mod-11 check digit."""
-    m = re.fullmatch(r"RC(\d{6,7})", rc or "", re.IGNORECASE)
-    if not m:
-        return False
-    body = m.group(1)
-    return rc_checksum_digit(body[:-1]) == body[-1]
+    """CAC number format check: RC/BN/IT + digits, or free-format legacy.
+    Never invents a checksum — any non-empty plausible registry number passes;
+    the registry lookup is the source of truth."""
+    return cac_number_kind(rc) is not None
 
 
 def mrz_check_digit(data: str) -> str:
@@ -102,15 +115,16 @@ def extract_nin(tokens: list[OcrToken]) -> dict[str, Any]:
 
 def extract_cac(tokens: list[OcrToken]) -> dict[str, Any]:
     txt = _text(tokens)
-    m = re.search(r"\b(RC\d{6,7})\b", txt, re.IGNORECASE)
-    rc = m.group(1).upper() if m else None
+    m = re.search(r"\b((?:RC|BN|IT)\s?\d{5,8})\b", txt, re.IGNORECASE)
+    rc = m.group(1).replace(" ", "").upper() if m else None
     directors: list[str] = []
     for t in tokens:
         if t.text.lower().startswith("director:"):
             directors.append(t.text.split(":", 1)[1].strip())
     fields: dict[str, Any] = {
         "rc_number": rc,
-        "rc_checksum_ok": rc_format_valid(rc) if rc else False,
+        "rc_format_ok": rc_format_valid(rc) if rc else False,
+        "rc_kind": cac_number_kind(rc),
         "company_name": _match_label(tokens, "company name") or _match_label(tokens, "name of company"),
         "reg_date": _match_label(tokens, "registered") or _match_date(txt),
         "directors": directors,

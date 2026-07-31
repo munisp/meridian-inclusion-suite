@@ -66,7 +66,9 @@ class Settings(BaseSettings):
     liveness_challenge_window_seconds: float = 10.0
     decision_approve: int = 70
     decision_step_up: int = 40
-    ubo_ownership_pct: float = 25.0
+    # UBO/PSC ownership threshold (strict `>`). Default 5%: Nigeria CAMA 2020
+    # PSC register norm; FATF R.10 "more than 25%" deployments set 25.0 via env.
+    ubo_ownership_pct: float = 5.0
     # SPEC §6: refuse auto-approve when any required check is sim
     allow_sim_approve: bool = False
 

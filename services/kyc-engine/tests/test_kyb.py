@@ -29,29 +29,44 @@ def test_ubo_over_25pct_extracted(monkeypatch):
                                   {"name": "B", "ownership_pct": 40.0}],
                     "sim": True}
     monkeypatch.setattr(kyb, "get_registry", lambda: FakeReg())
-    out = run_kyb({"rc_number": "RC1234562", "rc_checksum_ok": True})
+    out = run_kyb({"rc_number": "RC1234562", "rc_format_ok": True})
     assert [u["name"] for u in out["ubo"]] == ["A", "B"]
 
 
 def test_ubo_under_threshold_excluded(monkeypatch):
+    # default threshold is 5% (CAMA PSC); strictly-greater semantics: exactly
+    # 5.0% is NOT a PSC, 5.01% is.
     import kyc_engine.pipeline.stage_kyb as kyb
     class FakeReg:
         sim = True
         def lookup(self, rc):
             return {"rc_number": rc, "company_name": "X",
-                    "directors": [{"name": "A", "ownership_pct": 20.0},
-                                  {"name": "B", "ownership_pct": 10.0}],
+                    "directors": [{"name": "A", "ownership_pct": 5.0},
+                                  {"name": "B", "ownership_pct": 3.0}],
                     "sim": True}
     monkeypatch.setattr(kyb, "get_registry", lambda: FakeReg())
-    out = run_kyb({"rc_number": "RC1234562", "rc_checksum_ok": True})
+    out = run_kyb({"rc_number": "RC1234562", "rc_format_ok": True})
     assert out["ubo"] == []
 
 
-def test_rc_checksum_fail_issue():
-    out = run_kyb({"rc_number": "RC1234560", "rc_checksum_ok": False})
-    assert "rc_checksum_fail" in out["issues"]
+def test_ubo_just_over_5pct_included(monkeypatch):
+    import kyc_engine.pipeline.stage_kyb as kyb
+    class FakeReg:
+        sim = True
+        def lookup(self, rc):
+            return {"rc_number": rc, "company_name": "X",
+                    "directors": [{"name": "A", "ownership_pct": 5.01}],
+                    "sim": True}
+    monkeypatch.setattr(kyb, "get_registry", lambda: FakeReg())
+    out = run_kyb({"rc_number": "RC1234562", "rc_format_ok": True})
+    assert [u["name"] for u in out["ubo"]] == ["A"]
+
+
+def test_rc_format_fail_issue():
+    out = run_kyb({"rc_number": "RC1234560", "rc_format_ok": False})
+    assert "rc_format_fail" in out["issues"]
 
 
 def test_missing_rc_issue():
-    out = run_kyb({"rc_number": None, "rc_checksum_ok": False})
+    out = run_kyb({"rc_number": None, "rc_format_ok": False})
     assert "rc_number_missing" in out["issues"]
