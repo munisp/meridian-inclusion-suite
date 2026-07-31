@@ -22,7 +22,7 @@ WEIGHTS = {
     "kyb": 10,
 }
 
-HARD_FAIL_REASONS = {"FORENSICS_TAMPER", "FACE_MISMATCH", "SPOOF"}
+HARD_FAIL_REASONS = {"FORENSICS_TAMPER", "FACE_MISMATCH", "SPOOF", "SANCTIONS_HIT"}
 
 
 def decide(checks: list[dict[str, Any]], subject_type: str,

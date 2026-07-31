@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # --- integrations ---
     tin_graph_url: str = ""        # empty -> KYB CAC provision disabled (fail-closed)
     cac_registry_url: str = ""     # empty -> [SIM] deterministic fixtures
+    # --- sanctions/PEP screening ---
+    screening_provider_url: str = ""   # empty -> [SIM] bundled sample list
+    screening_list_path: str = ""      # override path for the offline sample list
+    screening_match_threshold: float = 0.85   # fuzzy name-match cutoff
     nin_verify_url: str = ""       # empty -> [SIM] NIMC adapter
     vnin_ttl_hours: int = 72       # NIMC vNIN token TTL
 

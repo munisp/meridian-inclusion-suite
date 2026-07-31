@@ -21,7 +21,8 @@ from ..config import get_settings
 from ..models.db import get_session
 from ..models.tables import (KycCase, KycCheck, KycDecision, KycDocument,
                              KycExtraction)
-from . import stage_decision, stage_fields, stage_forensics, stage_kyb
+from . import (stage_decision, stage_fields, stage_forensics, stage_kyb,
+               stage_screening)
 from .stage_face import match_faces
 from .stage_ocr import run_ocr
 from .stage_parse import parse_document
@@ -249,6 +250,11 @@ def evaluate_decision(case_id: str, sess=None, unknown_doctype: bool = False) ->
             elif c.kind == "liveness":
                 if c.detail.get("state") == "failed":
                     item.update(hard_fail=True, reason="SPOOF")
+            elif c.kind == "screening":
+                if c.detail.get("sanctions_hit"):
+                    item.update(hard_fail=True, reason="SANCTIONS_HIT")
+                if c.detail.get("pep_hit"):
+                    item["pep_hit"] = True
             assembled.append(item)
         dec = stage_decision.decide(assembled, case.subject_type, unknown_doctype,
                                     risk_flags=_edd_risk_flags(case, assembled))

@@ -1,0 +1,10 @@
+{
+  "_comment": "[SIM] Bundled SAMPLE screening list in an OFAC-style consolidated format (name/aliases/program/list) plus an NGA local list and a PEP sample. NOT a real sanctions list: production deployments must point screening_provider_url at a licensed list provider via the same ScreeningProvider interface ([REAL]).",
+  "entries": [
+    {"list": "OFAC_SDN_SAMPLE", "kind": "sanctions", "name": "EXAMPLE SANCTIONED INDIVIDUAL", "aliases": ["E S INDIVIDUAL"], "program": "SDGT", "dob": "1975-03-11"},
+    {"list": "OFAC_SDN_SAMPLE", "kind": "sanctions", "name": "EXAMPLE BLOCKED TRADING COMPANY", "aliases": ["EBTC"], "program": "SDGT"},
+    {"list": "NGA_LOCAL_SAMPLE", "kind": "sanctions", "name": "EXAMPLE LOCAL WATCHLIST ENTRY", "aliases": [], "program": "NGA-LOCAL"},
+    {"list": "PEP_SAMPLE", "kind": "pep", "name": "EXAMPLE POLITICALLY EXPOSED PERSON", "aliases": [], "position": "senior public official"},
+    {"list": "PEP_SAMPLE", "kind": "pep", "name": "EXAMPLE STATE GOVERNOR", "aliases": [], "position": "state governor"}
+  ]
+}
