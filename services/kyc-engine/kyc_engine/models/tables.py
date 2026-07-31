@@ -29,6 +29,8 @@ class KycCase(Base):
     subject_type: Mapped[str] = mapped_column(String(16))  # individual|business
     channel: Mapped[str] = mapped_column(String(32), default="api")
     subject_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # owning agent (token sub / X-Dev-Subject) — object-level authz anchor
+    agent_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="created")
     # created|documents_received|processing|liveness_pending|step_up|
     # approved|rejected|failed

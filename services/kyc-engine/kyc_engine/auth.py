@@ -89,6 +89,15 @@ def _verify_rs256(token: str) -> dict:
     iss = get_settings().keycloak_issuer
     if iss and payload.get("iss") != iss:
         raise HTTPException(401, "bad issuer")
+    # audience validation (OIDC): FAIL-CLOSED — no configured audience means
+    # every token is rejected in keycloak mode.
+    aud_expected = get_settings().keycloak_audience
+    if not aud_expected:
+        raise HTTPException(401, "audience not configured")
+    aud = payload.get("aud")
+    auds = aud if isinstance(aud, list) else [aud]
+    if aud_expected not in auds:
+        raise HTTPException(401, "bad audience")
     return payload
 
 
@@ -98,19 +107,32 @@ def _roles_from_claims(payload: dict) -> list[str]:
     return list(roles) + list(realm)
 
 
-def current_roles(
+class Principal:
+    """Authenticated caller: roles + stable subject id (object-level authz)."""
+
+    def __init__(self, roles: list[str], subject: str):
+        self.roles = roles
+        self.subject = subject
+
+
+def current_principal(
     request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
-) -> list[str]:
+) -> Principal:
     s = get_settings()
     if s.auth_mode == "dev":
         role = request.headers.get("X-Dev-Role", "")
         if role in (ROLE_AGENT, ROLE_REVIEWER, ROLE_ADMIN):
-            return [role]
+            return Principal([role], request.headers.get("X-Dev-Subject", "dev-agent"))
         raise HTTPException(401, "provide X-Dev-Role header (AUTH_MODE=dev)")
     if not creds:
         raise HTTPException(401, "missing bearer token")
-    return _roles_from_claims(_verify_rs256(creds.credentials))
+    payload = _verify_rs256(creds.credentials)
+    return Principal(_roles_from_claims(payload), str(payload.get("sub", "")))
+
+
+def current_roles(p: Principal = Depends(current_principal)) -> list[str]:
+    return p.roles
 
 
 def require_role(*allowed: str):
@@ -119,3 +141,16 @@ def require_role(*allowed: str):
             raise HTTPException(403, "insufficient role")
         return roles
     return dep
+
+
+# privileged roles may act across agents (review queue, administration)
+_CROSS_AGENT_ROLES = (ROLE_ADMIN, ROLE_REVIEWER)
+
+
+def require_case_access(case, principal: Principal) -> None:
+    """Object-level authz (BOLA guard): an agent may only touch their OWN
+    cases; reviewers/admins are excepted. Cross-agent access -> 403."""
+    if any(r in _CROSS_AGENT_ROLES for r in principal.roles):
+        return
+    if case.agent_ref and case.agent_ref != principal.subject:
+        raise HTTPException(403, "case belongs to another agent")
