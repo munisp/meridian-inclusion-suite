@@ -17,6 +17,7 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
 )
 
 // NINVerification is the result of an NIMC identity verification.
@@ -166,7 +167,8 @@ func (a *NIMCHTTPAdapter) VerifyNIN(nin string) (NINVerification, error) {
 
 // NewNINVerifierFromEnv wires NIMC_API_URL (+NIMC_API_KEY) → the real HTTP
 // adapter; legacy NIMC_URL is honoured; unset → simulator (H1 selection
-// rule). Startup never fails because the prod var is missing.
+// rule) in profile=dev ONLY. In profile=prod a missing NIMC_API_URL is a
+// fatal misconfiguration (audit O4/O8: no silent dev fallback in prod).
 func NewNINVerifierFromEnv() NINVerifier {
 	if u := os.Getenv("NIMC_API_URL"); u != "" {
 		log.Printf("profile=prod component=nimc-adapter url=%s", u)
@@ -175,6 +177,9 @@ func NewNINVerifierFromEnv() NINVerifier {
 	if u := os.Getenv("NIMC_URL"); u != "" { // legacy alias
 		log.Printf("profile=prod component=nimc-adapter url=%s (legacy NIMC_URL)", u)
 		return NewNIMCHTTPAdapter(u, os.Getenv("NIMC_API_KEY"))
+	}
+	if workflowx.IsProdProfile() {
+		log.Fatal("profile=prod FATAL: NIMC_API_URL is required (refusing to start with the NIMC simulator)")
 	}
 	log.Printf("profile=dev component=nimc-adapter (simulator)")
 	return NIMCSimulator{}

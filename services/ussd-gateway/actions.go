@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -34,13 +33,108 @@ func keyOr(name, fallback string) string {
 	return keyx.MustKey(name, fallback)
 }
 
-// deriveTIN mirrors services/onboarding LocalTINProvisioner (NIN=TIN fusion
-// approximation) so USSD-only registrations stay consistent.
-func deriveTIN(nin string) string {
-	ninHash := hmacHex(keyOr("NIN_HMAC_KEY", "meridian-dev-nin-key"), nin)
-	sum := sha256.Sum256([]byte("tin-fusion:" + ninHash))
-	n := binary.BigEndian.Uint64(sum[:8]) % 900000000
-	return fmt.Sprintf("2%09d", n)
+// isProdProfile mirrors keyx/workflowx: APP_PROFILE=prod|production or
+// AUTH_MODE=keycloak.
+func isProdProfile() bool {
+	p := strings.ToLower(os.Getenv("APP_PROFILE"))
+	if p == "prod" || p == "production" {
+		return true
+	}
+	return strings.EqualFold(os.Getenv("AUTH_MODE"), "keycloak")
+}
+
+// onboardingPost is the shared signed-role client for the onboarding svc.
+func onboardingPost(onbURL, path string, payload any, out any) (int, error) {
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(onbURL, "/")+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Dev-Role", "operator")
+	resp, err := httpClient().Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return resp.StatusCode, fmt.Errorf("onboarding %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return resp.StatusCode, err
+		}
+	}
+	return resp.StatusCode, nil
+}
+
+// createOperatorViaService registers the operator; a duplicate-NIN 409
+// resolves to the existing operator id (idempotent re-registration).
+func createOperatorViaService(onbURL, nin, name, state, agentID string) (string, error) {
+	var op struct {
+		ID string `json:"id"`
+	}
+	_, err := onboardingPost(onbURL, "/v1/operators", map[string]string{
+		"nin": nin, "full_name": name, "state": state, "agent_id": agentID,
+	}, &op)
+	if err == nil && op.ID != "" {
+		return op.ID, nil
+	}
+	// duplicate: resolve the existing record
+	var lk struct {
+		Found      bool   `json:"found"`
+		OperatorID string `json:"operator_id"`
+	}
+	if _, lerr := onboardingPost(onbURL, "/v1/operators/lookup", map[string]string{"nin": nin}, &lk); lerr == nil && lk.Found {
+		return lk.OperatorID, nil
+	}
+	return "", err
+}
+
+// provisionTINViaService runs wf-onb-tin-provision via the API and returns
+// the issued TIN. Any failure (NIMC adapter outage, verification miss,
+// service down) is an error — the caller parks the registration.
+func provisionTINViaService(onbURL, operatorID, nin string) (tin, tinHash string, err error) {
+	var run struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+		Result struct {
+			TIN     string `json:"tin"`
+			TINHash string `json:"tin_hash"`
+		} `json:"result"`
+	}
+	if _, err = onboardingPost(onbURL, "/v1/tin/provision", map[string]string{
+		"operator_id": operatorID, "nin": nin,
+	}, &run); err != nil {
+		return "", "", err
+	}
+	if run.Status != "completed" || run.Result.TIN == "" {
+		return "", "", fmt.Errorf("provision workflow did not complete: %s", run.Error)
+	}
+	return run.Result.TIN, run.Result.TINHash, nil
+}
+
+// parkTINRegistration moves the operator to pending_review (best effort).
+func parkTINRegistration(onbURL, operatorID string) {
+	_, _ = onboardingPost(onbURL, "/v1/operators/"+operatorID+"/status", map[string]string{
+		"to": "pending_review", "reason": "ussd: verification unavailable at registration",
+	}, nil)
+}
+
+type operatorLookup struct {
+	Found        bool   `json:"found"`
+	OperatorID   string `json:"operator_id"`
+	Status       string `json:"status"`
+	TIN          string `json:"tin"`
+	TINHash      string `json:"tin_hash"`
+	ReviewStatus string `json:"review_status"`
+}
+
+func lookupOperatorByNIN(onbURL, nin string) (operatorLookup, error) {
+	var out operatorLookup
+	_, err := onboardingPost(onbURL, "/v1/operators/lookup", map[string]string{"nin": nin}, &out)
+	return out, err
 }
 
 func maskNIN(nin string) string {
@@ -96,54 +190,98 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 
 	actions := map[string]ActionHandler{}
 
-	// onb.register: NIN verify + TIN provision (service or local fallback).
+	// onb.register: register + NIMC verify + TIN provision THROUGH the
+	// onboarding service (audit O3: the USSD path must not bypass NIMC or
+	// derive TINs locally). On an adapter/service outage the registration is
+	// parked as pending_review — never issued a local TIN.
 	actions["onb.register"] = func(sess *Session) error {
 		nin := sess.Data["nin"]
 		name := sess.Data["name"]
 		if nin == "" || name == "" {
 			return fmt.Errorf("missing nin or name in session")
 		}
-		if onbURL != "" {
-			// try the onboarding service
-			body, _ := json.Marshal(map[string]string{
-				"nin": nin, "full_name": name, "state": sess.Data["state"], "agent_id": "ussd:" + sess.Phone,
-			})
-			req, _ := http.NewRequest(http.MethodPost, onbURL+"/v1/operators", bytes.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Dev-Role", "operator")
-			resp, err := httpClient().Do(req)
-			if err == nil && resp.StatusCode < 300 {
-				var op struct {
-					ID string `json:"id"`
-				}
-				_ = json.NewDecoder(resp.Body).Decode(&op)
-				resp.Body.Close()
-				sess.Data["operator_id"] = op.ID
-			} else if err == nil {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-			}
+		park := func(reason string) {
+			sess.Data["registration_status"] = "pending_review"
+			sess.Data["park_reason"] = reason
+			sess.Data["_next_override"] = "onb_pending"
 		}
-		tin := deriveTIN(nin)
+		if onbURL == "" {
+			if isProdProfile() {
+				// fail closed: no onboarding service configured in prod
+				return fmt.Errorf("registration service is temporarily unavailable; please try again later")
+			}
+			// dev standalone: park locally, never derive a TIN
+			park("onboarding service not configured (dev)")
+			bus.Publish("nrs.onb.ussd.v1", map[string]any{
+				"flow": "register", "phone": sess.Phone, "state": sess.Data["state"], "outcome": "pending_review", "via": "dev_no_service",
+			})
+			return nil
+		}
+		// 1) create the operator record (idempotent per NIN via 409 handling)
+		opID, err := createOperatorViaService(onbURL, nin, name, sess.Data["state"], "ussd:"+sess.Phone)
+		if err != nil {
+			park("operator create failed")
+			bus.Publish("nrs.onb.ussd.v1", map[string]any{
+				"flow": "register", "phone": sess.Phone, "outcome": "pending_review", "via": "onboarding_svc", "stage": "create",
+			})
+			return nil
+		}
+		sess.Data["operator_id"] = opID
+		// 2) NIMC verify + TIN provision through the durable workflow
+		tin, tinHash, err := provisionTINViaService(onbURL, opID, nin)
+		if err != nil {
+			// adapter outage / verification failure -> park for review
+			parkTINRegistration(onbURL, opID)
+			park("verification unavailable")
+			bus.Publish("nrs.onb.ussd.v1", map[string]any{
+				"flow": "register", "phone": sess.Phone, "operator_id": opID, "outcome": "pending_review", "stage": "provision",
+			})
+			return nil
+		}
 		sess.Data["tin"] = tin
-		sess.Data["tin_hash"] = hmacHex(keyOr("TIN_HMAC_KEY", "meridian-dev-tin-key"), tin)
+		sess.Data["tin_hash"] = tinHash
+		sess.Data["registration_status"] = "tin_provisioned"
 		bus.Publish("nrs.onb.ussd.v1", map[string]any{
-			"flow": "register", "phone": sess.Phone, "tin_hash": sess.Data["tin_hash"], "state": sess.Data["state"],
+			"flow": "register", "phone": sess.Phone, "operator_id": opID, "tin_hash": tinHash, "state": sess.Data["state"], "outcome": "tin_provisioned",
 		})
 		return nil
 	}
 
-	// onb.tin_status: report provisioning status for a NIN.
+	// onb.tin_status: report provisioning status for a NIN, resolved through
+	// the onboarding service (no local TIN derivation).
 	actions["onb.tin_status"] = func(sess *Session) error {
 		nin := sess.Data["nin"]
 		if nin == "" {
 			return fmt.Errorf("missing nin in session")
 		}
 		sess.Data["nin_masked"] = maskNIN(nin)
-		tin := deriveTIN(nin)
-		sess.Data["tin"] = tin
-		sess.Data["tin_status"] = "provisioned (NIN=TIN fusion)"
-		bus.Publish("nrs.onb.ussd.v1", map[string]any{"flow": "tin_status", "phone": sess.Phone})
+		if onbURL == "" {
+			if isProdProfile() {
+				return fmt.Errorf("status service is temporarily unavailable; please try again later")
+			}
+			sess.Data["tin"] = "-"
+			sess.Data["tin_status"] = "unknown (onboarding service not configured, dev)"
+			return nil
+		}
+		st, err := lookupOperatorByNIN(onbURL, nin)
+		if err != nil {
+			return fmt.Errorf("status service is temporarily unavailable; please try again later")
+		}
+		if !st.Found {
+			sess.Data["tin"] = "-"
+			sess.Data["tin_status"] = "not registered"
+		} else {
+			sess.Data["operator_id"] = st.OperatorID
+			if st.TIN != "" {
+				sess.Data["tin"] = st.TIN
+			} else {
+				sess.Data["tin"] = "-"
+			}
+			sess.Data["tin_status"] = st.Status
+		}
+		bus.Publish("nrs.onb.ussd.v1", map[string]any{
+			"flow": "tin_status", "phone": sess.Phone, "found": st.Found,
+		})
 		return nil
 	}
 

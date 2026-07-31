@@ -5,7 +5,11 @@
 // resolution, operator registry CRUD and the wf-onb-* workflow functions.
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
+)
 
 const serviceName = "onboarding"
 const serviceVersion = "1.0.0"
@@ -14,24 +18,26 @@ const serviceVersion = "1.0.0"
 // holds the TIN; every event/analytics payload carries only nin_hash/tin_hash
 // per §1.3 pseudonymisation.
 type Operator struct {
-	ID            string `json:"id"`
-	NINHash       string `json:"nin_hash"`
-	TINHash       string `json:"tin_hash,omitempty"`
-	TIN           string `json:"tin,omitempty"`
-	FullName      string `json:"full_name"`
-	Phone         string `json:"phone"`
-	State         string `json:"state"`
-	LGA           string `json:"lga"`
-	TradeCategory string `json:"trade_category"`
-	Status        string `json:"status"` // registered|nin_verified|tin_provisioned|graduated
-	AgentID       string `json:"agent_id"`
-	ConsentID     string `json:"consent_id,omitempty"`
-	Serial        uint64 `json:"serial"` // §1.5 low-64 entity serial
-	CapturedAt    string `json:"captured_at"`
-	SyncedAt      string `json:"synced_at"`
-	ClientRef     string `json:"client_ref,omitempty"` // agent-side idempotency ref
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID            string   `json:"id"`
+	NINHash       string   `json:"nin_hash"`
+	TINHash       string   `json:"tin_hash,omitempty"`
+	TIN           string   `json:"tin,omitempty"`
+	FullName      string   `json:"full_name"`
+	Phone         string   `json:"phone"`
+	State         string   `json:"state"`
+	LGA           string   `json:"lga"`
+	TradeCategory string   `json:"trade_category"`
+	Status        string   `json:"status"`                  // registered|pending_review|nin_verified|tin_provisioned|graduated|rejected
+	ReviewStatus  string   `json:"review_status,omitempty"` // pending|approved|rejected (agent-captured records)
+	Documents     []DocRef `json:"documents,omitempty"`
+	AgentID       string   `json:"agent_id"`
+	ConsentID     string   `json:"consent_id,omitempty"`
+	Serial        uint64   `json:"serial"` // §1.5 low-64 entity serial
+	CapturedAt    string   `json:"captured_at"`
+	SyncedAt      string   `json:"synced_at"`
+	ClientRef     string   `json:"client_ref,omitempty"` // agent-side idempotency ref
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
 }
 
 // ConsentRecord is the local NDPA consent fallback record.
@@ -80,17 +86,9 @@ type CaptureItemResult struct {
 	OfflineAgeHours int    `json:"offline_age_hours"`
 }
 
-// WorkflowRun records one wf-onb-* execution (dev in-process runner).
-type WorkflowRun struct {
-	ID        string   `json:"id"`
-	Workflow  string   `json:"workflow"`
-	Input     any      `json:"input,omitempty"`
-	Steps     []string `json:"steps"`
-	Status    string   `json:"status"` // completed|failed
-	Error     string   `json:"error,omitempty"`
-	Result    any      `json:"result,omitempty"`
-	StartedAt string   `json:"started_at"`
-	EndedAt   string   `json:"ended_at"`
-}
+// WorkflowRun records one wf-onb-* execution. It is the persisted durable
+// run record from internal/platform/workflowx (running|completed|failed,
+// re-drivable while not completed).
+type WorkflowRun = workflowx.Run
 
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }

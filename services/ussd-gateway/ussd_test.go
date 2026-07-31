@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -44,16 +48,73 @@ func runFlow(t *testing.T, eng *Engine, store SessionStore, inputs ...string) (s
 	return last, sess
 }
 
+// stubOnboarding is a minimal onboarding-service double: operator create +
+// lookup + provision + status park.
+func stubOnboarding(t *testing.T, provisionFails bool) *httptest.Server {
+	t.Helper()
+	ops := map[string]string{} // nin -> operator id
+	parked := map[string]bool{}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/operators":
+			var in struct {
+				NIN string `json:"nin"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if id, dup := ops[in.NIN]; dup {
+				w.WriteHeader(409)
+				fmt.Fprintf(w, `{"title":"duplicate_nin","detail":"operator already registered as %s"}`, id)
+				return
+			}
+			ops[in.NIN] = "op_stub_1"
+			w.WriteHeader(201)
+			fmt.Fprint(w, `{"id":"op_stub_1"}`)
+		case r.Method == "POST" && r.URL.Path == "/v1/operators/lookup":
+			var in struct {
+				NIN string `json:"nin"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if id, ok := ops[in.NIN]; ok {
+				status := "tin_provisioned"
+				if parked[id] {
+					status = "pending_review"
+				}
+				fmt.Fprintf(w, `{"found":true,"operator_id":%q,"status":%q,"tin":"200000001","tin_hash":"abc"}`, id, status)
+			} else {
+				fmt.Fprint(w, `{"found":false}`)
+			}
+		case r.Method == "POST" && r.URL.Path == "/v1/tin/provision":
+			if provisionFails {
+				w.WriteHeader(422)
+				fmt.Fprint(w, `{"title":"workflow_failed","detail":"nimc adapter: connection refused"}`)
+				return
+			}
+			fmt.Fprint(w, `{"id":"run_1","workflow":"wf-onb-tin-provision","status":"completed","result":{"tin":"200000001","tin_hash":"abc"}}`)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/status"):
+			parked["op_stub_1"] = true
+			fmt.Fprint(w, `{"id":"op_stub_1","status":"pending_review"}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+}
+
+// O3: full USSD registration routes through the onboarding service (NIMC +
+// tin-provision) — no local TIN derivation.
 func TestOnboardingFlow(t *testing.T) {
+	stub := stubOnboarding(t, false)
+	defer stub.Close()
+	t.Setenv("ONBOARDING_URL", stub.URL)
 	eng, store, pub := newTestEngine(t)
 	out, sess := runFlow(t, eng, store, "1", "12345678901", "Adaeze Okafor", "1")
 	if !strings.Contains(out, "Registration successful") {
 		t.Fatalf("unexpected final screen: %s", out)
 	}
-	if !strings.Contains(out, "TIN: 2") {
-		t.Fatalf("expected TIN in output: %s", out)
+	if !strings.Contains(out, "TIN: 200000001") {
+		t.Fatalf("expected service-issued TIN in output: %s", out)
 	}
-	if sess.Data["tin"] == "" || sess.Data["state"] != "Lagos" {
+	if sess.Data["tin"] != "200000001" || sess.Data["operator_id"] != "op_stub_1" || sess.Data["state"] != "Lagos" {
 		t.Fatalf("session data: %+v", sess.Data)
 	}
 	found := false
@@ -64,6 +125,47 @@ func TestOnboardingFlow(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected nrs.onb.ussd.v1 event")
+	}
+}
+
+// O3: on an adapter outage the registration is parked as pending_review and
+// NO TIN is issued.
+func TestOnboardingFlowParksOnAdapterOutage(t *testing.T) {
+	stub := stubOnboarding(t, true)
+	defer stub.Close()
+	t.Setenv("ONBOARDING_URL", stub.URL)
+	eng, store, _ := newTestEngine(t)
+	out, sess := runFlow(t, eng, store, "1", "12345678901", "Adaeze Okafor", "1")
+	if !strings.Contains(out, "PENDING REVIEW") {
+		t.Fatalf("expected pending-review screen: %s", out)
+	}
+	if sess.Data["tin"] != "" || sess.Data["registration_status"] != "pending_review" {
+		t.Fatalf("no TIN may be issued on outage: %+v", sess.Data)
+	}
+}
+
+// O3: dev standalone (no ONBOARDING_URL) parks locally and never derives a TIN.
+func TestOnboardingFlowDevStandaloneParks(t *testing.T) {
+	t.Setenv("ONBOARDING_URL", "")
+	eng, store, _ := newTestEngine(t)
+	out, sess := runFlow(t, eng, store, "1", "12345678901", "Adaeze Okafor", "1")
+	if !strings.Contains(out, "PENDING REVIEW") {
+		t.Fatalf("expected pending screen: %s", out)
+	}
+	if sess.Data["tin"] != "" {
+		t.Fatalf("dev standalone must not derive a TIN: %+v", sess.Data)
+	}
+}
+
+// O3: prod profile without ONBOARDING_URL fails closed (error screen).
+func TestOnboardingFlowProdFailClosed(t *testing.T) {
+	t.Setenv("ONBOARDING_URL", "")
+	t.Setenv("APP_PROFILE", "prod")
+	defer t.Setenv("APP_PROFILE", "")
+	eng, store, _ := newTestEngine(t)
+	out, _ := runFlow(t, eng, store, "1", "12345678901", "Adaeze Okafor", "1")
+	if !strings.Contains(out, "unavailable") {
+		t.Fatalf("expected fail-closed error screen: %s", out)
 	}
 }
 
@@ -131,9 +233,15 @@ func TestSessionTTL(t *testing.T) {
 }
 
 func TestTINStatusFlow(t *testing.T) {
+	stub := stubOnboarding(t, false)
+	defer stub.Close()
+	t.Setenv("ONBOARDING_URL", stub.URL)
+	// register first so the lookup finds the record
+	eng0, store0, _ := newTestEngine(t)
+	_, _ = runFlow(t, eng0, store0, "1", "12345678901", "Adaeze Okafor", "1")
 	eng, store, _ := newTestEngine(t)
 	out, _ := runFlow(t, eng, store, "2", "12345678901")
-	if !strings.Contains(out, "TIN: 2") || !strings.Contains(out, "provisioned") {
+	if !strings.Contains(out, "TIN: 200000001") || !strings.Contains(out, "tin_provisioned") {
 		t.Fatalf("unexpected tin status screen: %s", out)
 	}
 	if !strings.Contains(out, "123*****901") {

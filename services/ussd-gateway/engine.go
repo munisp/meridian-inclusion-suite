@@ -168,7 +168,14 @@ func (e *Engine) renderCurrent(sess *Session, lastInput string) (string, bool, e
 				}
 				return "", false, err
 			}
-			sess.Menu = menu.Next
+			// an action may override the success branch (e.g. onb.register
+			// parking a registration as pending_review during an outage)
+			if ov := sess.Data["_next_override"]; ov != "" {
+				delete(sess.Data, "_next_override")
+				sess.Menu = ov
+			} else {
+				sess.Menu = menu.Next
+			}
 		case "end":
 			return render(localizedText(sess, menu), sess), false, nil
 		default: // options | input

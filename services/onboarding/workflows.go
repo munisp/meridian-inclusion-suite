@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
-	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
 )
 
 // §1.5 namespace codes used for onboarding ledger accounts.
@@ -22,9 +23,26 @@ const commissionPerVerifiedKobo uint64 = 20000
 // presumptiveCeilingKobo: operators above this turnover estimate graduate to MBS (₦25m).
 const presumptiveCeilingKobo uint64 = 2_500_000_000
 
-// Workflows is the wf-onb-* registry with a dev in-process runner
-// (Temporal server is an external rail; wired via temporal-sdkx in core,
-// here each workflow is a plain function with recorded steps + events).
+// storeRunStore adapts the document store to workflowx.RunStore (runs live in
+// the "workflow_runs" collection — the same place the dev runner used, so
+// GET /v1/workflows/runs is unchanged).
+type storeRunStore struct{ st *store.Store }
+
+func (s storeRunStore) PutRun(run workflowx.Run) error {
+	return s.st.Put("workflow_runs", run.ID, run)
+}
+
+func (s storeRunStore) GetRun(id string) (workflowx.Run, bool, error) {
+	var run workflowx.Run
+	ok, err := s.st.Get("workflow_runs", id, &run)
+	return run, ok, err
+}
+
+// Workflows is the wf-onb-* registry. Definitions are durable workflowx
+// workflows built from named, idempotent activities (audit O1): the dev
+// profile runs them on the persisted in-process runner (crash → run stays
+// "running" → POST /v1/workflows/runs/{id}/redrive re-drives idempotently);
+// profile=prod requires TEMPORAL_URL (workflowx.NewRunnerFromEnv, fail-closed).
 type Workflows struct {
 	st          *store.Store
 	registry    *Registry
@@ -33,109 +51,145 @@ type Workflows struct {
 	consent     *ConsentService
 	ledger      ledger.Client
 	bus         events.Bus
+	runner      *workflowx.Runner
 }
 
+// NewWorkflows wires the registry with the dev in-process durable runner
+// (used by tests and offline tools).
 func NewWorkflows(st *store.Store, reg *Registry, v NINVerifier, p TINProvisioner, c *ConsentService, lc ledger.Client, bus events.Bus) *Workflows {
-	return &Workflows{st: st, registry: reg, verifier: v, provisioner: p, consent: c, ledger: lc, bus: bus}
+	r := workflowx.NewRunner(storeRunStore{st}, workflowx.DefaultRetryPolicy, "inproc", nil)
+	return NewWorkflowsWithRunner(st, reg, v, p, c, lc, bus, r)
 }
 
-func (w *Workflows) record(name string, input any, fn func(run *WorkflowRun) error) WorkflowRun {
-	run := WorkflowRun{ID: ids.WithPrefix("run"), Workflow: name, Input: input, StartedAt: nowRFC3339(), Status: "completed"}
-	if err := fn(&run); err != nil {
-		run.Status = "failed"
-		run.Error = err.Error()
-	}
-	run.EndedAt = nowRFC3339()
-	_ = w.st.Put("workflow_runs", run.ID, run)
-	return run
+// NewWorkflowsWithRunner wires the registry with an explicit runner
+// (main.go: workflowx.NewRunnerFromEnv — TEMPORAL_URL prod hook).
+func NewWorkflowsWithRunner(st *store.Store, reg *Registry, v NINVerifier, p TINProvisioner, c *ConsentService, lc ledger.Client, bus events.Bus, runner *workflowx.Runner) *Workflows {
+	w := &Workflows{st: st, registry: reg, verifier: v, provisioner: p, consent: c, ledger: lc, bus: bus, runner: runner}
+	w.register()
+	return w
 }
 
-func (w *Workflows) step(run *WorkflowRun, format string, args ...any) {
-	run.Steps = append(run.Steps, fmt.Sprintf(format, args...))
-}
+// register declares workflow definitions + activities on the runner.
+func (w *Workflows) register() {
+	r := w.runner
 
-// Names is the wf-onb-* catalog.
-func (w *Workflows) Names() []string {
-	return []string{
-		"wf-onb-tin-provision",
-		"wf-onb-capture-ingest",
-		"wf-onb-ledger-rollup",
-		"wf-onb-commission-settlement",
-		"wf-onb-filing-reminders",
-		"wf-onb-mbs-graduate",
-	}
-}
-
-// Run dispatches a workflow by name.
-func (w *Workflows) Run(name string, input map[string]any) (WorkflowRun, error) {
-	switch name {
-	case "wf-onb-tin-provision":
-		opID, _ := input["operator_id"].(string)
-		nin, _ := input["nin"].(string)
-		return w.TINProvision(opID, nin), nil
-	case "wf-onb-capture-ingest":
-		return w.CaptureIngestStats(), nil
-	case "wf-onb-ledger-rollup":
-		return w.LedgerRollup(), nil
-	case "wf-onb-commission-settlement":
-		return w.CommissionSettlement(), nil
-	case "wf-onb-filing-reminders":
-		return w.FilingReminders(), nil
-	case "wf-onb-mbs-graduate":
-		return w.MBSGraduate(), nil
-	default:
-		return WorkflowRun{}, fmt.Errorf("unknown workflow %q (have %v)", name, w.Names())
-	}
-}
-
-// TINProvision (wf-onb-tin-provision): verify NIN with NIMC, then provision
-// TIN via tin-graph with local fallback, update operator, emit event.
-func (w *Workflows) TINProvision(operatorID, nin string) WorkflowRun {
-	return w.record("wf-onb-tin-provision", map[string]string{"operator_id": operatorID}, func(run *WorkflowRun) error {
-		op, ok, err := w.registry.Get(operatorID)
+	// --- activities (idempotent; safe to re-execute on redrive) ---
+	r.RegisterActivity("act-nimc-verify", func(ctx context.Context, in any) (any, error) {
+		m := in.(map[string]any)
+		op, ok, err := w.registry.Get(m["operator_id"].(string))
 		if err != nil || !ok {
-			return fmt.Errorf("operator %s not found", operatorID)
+			return nil, fmt.Errorf("operator not found")
 		}
-		v, err := w.verifier.VerifyNIN(nin)
+		// idempotent: already verified -> return the recorded hash
+		if op.NINHash != "" && (op.Status == "nin_verified" || op.Status == "tin_provisioned" || op.Status == "graduated") {
+			return map[string]any{"nin_hash": op.NINHash, "verified": true, "source": "cached"}, nil
+		}
+		v, err := w.verifier.VerifyNIN(m["nin"].(string))
 		if err != nil {
-			return fmt.Errorf("nimc verify: %w", err)
+			return nil, fmt.Errorf("nimc verify: %w", err)
 		}
-		w.step(run, "nimc.verify -> verified=%v source=%s ref=%s", v.Verified, v.Source, v.Reference)
 		if !v.Verified {
-			return fmt.Errorf("NIMC verification failed: %s", v.Detail)
+			return nil, fmt.Errorf("NIMC verification failed: %s", v.Detail)
 		}
 		if op.NINHash != "" && op.NINHash != v.NINHash {
-			return fmt.Errorf("NIN does not match operator record")
+			return nil, fmt.Errorf("NIN does not match operator record")
 		}
-		op.NINHash = v.NINHash
-		op.Status = "nin_verified"
-		prov, err := w.provisioner.ProvisionForNIN(v.NINHash)
+		return map[string]any{"nin_hash": v.NINHash, "verified": true, "source": v.Source, "reference": v.Reference}, nil
+	})
+	r.RegisterActivity("act-tin-provision", func(ctx context.Context, in any) (any, error) {
+		m := in.(map[string]any)
+		op, ok, err := w.registry.Get(m["operator_id"].(string))
+		if err != nil || !ok {
+			return nil, fmt.Errorf("operator not found")
+		}
+		if op.TIN != "" { // idempotent: already provisioned
+			return map[string]any{"tin": op.TIN, "tin_hash": op.TINHash, "source": "cached"}, nil
+		}
+		prov, err := w.provisioner.ProvisionForNIN(m["nin_hash"].(string))
 		if err != nil {
-			return fmt.Errorf("tin provision: %w", err)
+			return nil, fmt.Errorf("tin provision: %w", err)
 		}
-		w.step(run, "tin.provision -> tin=%s source=%s", prov.TIN, prov.Source)
-		op.TIN = prov.TIN
-		op.TINHash = prov.TINHash
-		op.Status = "tin_provisioned"
-		if err := w.registry.Update(op); err != nil {
+		return map[string]any{"tin": prov.TIN, "tin_hash": prov.TINHash, "source": prov.Source}, nil
+	})
+	r.RegisterActivity("act-operator-update", func(ctx context.Context, in any) (any, error) {
+		m := in.(map[string]any)
+		op, ok, err := w.registry.Get(m["operator_id"].(string))
+		if err != nil || !ok {
+			return nil, fmt.Errorf("operator not found")
+		}
+		op.NINHash = m["nin_hash"].(string)
+		op.TIN = m["tin"].(string)
+		op.TINHash = m["tin_hash"].(string)
+		// registered -> nin_verified -> tin_provisioned (idempotent per state)
+		if err := w.registry.Transition(&op, "nin_verified", "wf-onb-tin-provision"); err != nil {
+			return nil, err
+		}
+		if err := w.registry.Transition(&op, "tin_provisioned", "wf-onb-tin-provision"); err != nil {
+			return nil, err
+		}
+		return map[string]any{"operator_id": op.ID, "status": op.Status}, nil
+	})
+	r.RegisterActivity("act-publish-provisioned", func(ctx context.Context, in any) (any, error) {
+		m := in.(map[string]any)
+		// at-least-once: event id carries the run id so consumers can dedupe
+		w.bus.Publish("nrs.onb.tin.provisioned.v1", events.New("nrs.onb.tin.provisioned.v1", serviceName, "", "", map[string]any{
+			"operator_id": m["operator_id"], "nin_hash": m["nin_hash"], "tin_hash": m["tin_hash"], "source": m["source"],
+		}))
+		return nil, nil
+	})
+
+	// --- workflow definitions ---
+	r.RegisterWorkflow("wf-onb-tin-provision", func(ctx *workflowx.Ctx) error {
+		m, _ := ctx.Run.Input.(map[string]any)
+		if m == nil {
+			if s, ok := ctx.Run.Input.(map[string]string); ok {
+				m = map[string]any{}
+				for k, v := range s {
+					m[k] = v
+				}
+			}
+		}
+		opID, _ := m["operator_id"].(string)
+		nin, _ := m["nin"].(string)
+		if opID == "" {
+			return fmt.Errorf("operator_id input is required")
+		}
+		ver, err := ctx.ExecuteActivity("act-nimc-verify", map[string]any{"operator_id": opID, "nin": nin})
+		if err != nil {
 			return err
 		}
-		w.bus.Publish("nrs.onb.tin.provisioned.v1", events.New("nrs.onb.tin.provisioned.v1", serviceName, "", "", map[string]any{
-			"operator_id": op.ID, "nin_hash": op.NINHash, "tin_hash": op.TINHash, "source": prov.Source,
-		}))
-		w.step(run, "event nrs.onb.tin.provisioned.v1 published")
-		run.Result = map[string]any{"operator_id": op.ID, "tin": op.TIN, "tin_hash": op.TINHash, "source": prov.Source}
+		vm := ver.(map[string]any)
+		prov, err := ctx.ExecuteActivity("act-tin-provision", map[string]any{"operator_id": opID, "nin_hash": vm["nin_hash"]})
+		if err != nil {
+			return err
+		}
+		pm := prov.(map[string]any)
+		if _, err := ctx.ExecuteActivity("act-operator-update", map[string]any{
+			"operator_id": opID, "nin_hash": vm["nin_hash"], "tin": pm["tin"], "tin_hash": pm["tin_hash"],
+		}); err != nil {
+			return err
+		}
+		if _, err := ctx.ExecuteActivity("act-publish-provisioned", map[string]any{
+			"operator_id": opID, "nin_hash": vm["nin_hash"], "tin_hash": pm["tin_hash"], "source": pm["source"],
+		}); err != nil {
+			return err
+		}
+		ctx.Run.Result = map[string]any{"operator_id": opID, "tin": pm["tin"], "tin_hash": pm["tin_hash"], "source": pm["source"]}
 		return nil
 	})
-}
 
-// CaptureIngestStats (wf-onb-capture-ingest): rolls up batch ingest stats and
-// emits the ingest event (the synchronous ingest itself happens in the API).
-func (w *Workflows) CaptureIngestStats() WorkflowRun {
-	return w.record("wf-onb-capture-ingest", nil, func(run *WorkflowRun) error {
+	r.RegisterWorkflow("wf-onb-capture-ingest", func(ctx *workflowx.Ctx) error {
+		res, err := ctx.ExecuteActivity("act-capture-rollup", nil)
+		if err != nil {
+			return err
+		}
+		ctx.Run.Result = res
+		return nil
+	})
+	r.RegisterActivity("act-capture-rollup", func(ctx context.Context, in any) (any, error) {
 		var batches []CaptureBatch
 		if err := w.st.List("capture_batches", &batches); err != nil {
-			return err
+			return nil, err
 		}
 		created, conflicts, rejected, dup := 0, 0, 0, 0
 		for _, b := range batches {
@@ -154,10 +208,88 @@ func (w *Workflows) CaptureIngestStats() WorkflowRun {
 		}
 		res := map[string]any{"batches": len(batches), "created": created, "conflict_resolved": conflicts, "rejected": rejected, "duplicate_client_ref": dup}
 		w.bus.Publish("nrs.onb.capture.ingested.v1", events.New("nrs.onb.capture.ingested.v1", serviceName, "", "", res))
-		w.step(run, "rollup: %v", res)
-		run.Result = res
+		return res, nil
+	})
+
+	r.RegisterWorkflow("wf-onb-ledger-rollup", func(ctx *workflowx.Ctx) error {
+		res, err := ctx.ExecuteActivity("act-ledger-rollup", nil)
+		if err != nil {
+			return err
+		}
+		ctx.Run.Result = res
 		return nil
 	})
+	r.RegisterActivity("act-ledger-rollup", func(ctx context.Context, in any) (any, error) {
+		return w.ledgerRollup()
+	})
+
+	r.RegisterWorkflow("wf-onb-commission-settlement", func(ctx *workflowx.Ctx) error {
+		res, err := ctx.ExecuteActivity("act-commission-settlement", nil)
+		if err != nil {
+			return err
+		}
+		ctx.Run.Result = res
+		return nil
+	})
+	r.RegisterActivity("act-commission-settlement", func(ctx context.Context, in any) (any, error) {
+		return w.commissionSettlement()
+	})
+
+	r.RegisterWorkflow("wf-onb-filing-reminders", func(ctx *workflowx.Ctx) error {
+		res, err := ctx.ExecuteActivity("act-filing-reminders", nil)
+		if err != nil {
+			return err
+		}
+		ctx.Run.Result = res
+		return nil
+	})
+	r.RegisterActivity("act-filing-reminders", func(ctx context.Context, in any) (any, error) {
+		return w.filingReminders()
+	})
+
+	r.RegisterWorkflow("wf-onb-mbs-graduate", func(ctx *workflowx.Ctx) error {
+		res, err := ctx.ExecuteActivity("act-mbs-graduate", nil)
+		if err != nil {
+			return err
+		}
+		ctx.Run.Result = res
+		return nil
+	})
+	r.RegisterActivity("act-mbs-graduate", func(ctx context.Context, in any) (any, error) {
+		return w.mbsGraduate()
+	})
+}
+
+// Names is the wf-onb-* catalog.
+func (w *Workflows) Names() []string { return w.runner.WorkflowNames() }
+
+// Run dispatches a workflow by name through the durable runner.
+func (w *Workflows) Run(name string, input map[string]any) (WorkflowRun, error) {
+	run, err := w.runner.Execute(context.Background(), name, input)
+	return WorkflowRun(run), err
+}
+
+// Redrive re-executes a crashed/failed run idempotently (crash recovery).
+func (w *Workflows) Redrive(runID string) (WorkflowRun, error) {
+	run, err := w.runner.Redrive(context.Background(), runID)
+	return WorkflowRun(run), err
+}
+
+func (w *Workflows) mustRun(name string, input map[string]any) WorkflowRun {
+	run, _ := w.Run(name, input)
+	return run
+}
+
+// TINProvision (wf-onb-tin-provision): verify NIN with NIMC, then provision
+// TIN via tin-graph with local fallback, update operator, emit event.
+func (w *Workflows) TINProvision(operatorID, nin string) WorkflowRun {
+	return w.mustRun("wf-onb-tin-provision", map[string]any{"operator_id": operatorID, "nin": nin})
+}
+
+// CaptureIngestStats (wf-onb-capture-ingest): rolls up batch ingest stats and
+// emits the ingest event (the synchronous ingest itself happens in the API).
+func (w *Workflows) CaptureIngestStats() WorkflowRun {
+	return w.mustRun("wf-onb-capture-ingest", nil)
 }
 
 // ensureCommissionAccounts creates the pool + agent commission accounts on
@@ -202,168 +334,158 @@ func hashSerial(s string) uint64 {
 
 // LedgerRollup (wf-onb-ledger-rollup): aggregate operator counts + commission
 // accruals per agent into ledger 700; funds the pool from a treasury offset.
-func (w *Workflows) LedgerRollup() WorkflowRun {
-	return w.record("wf-onb-ledger-rollup", nil, func(run *WorkflowRun) error {
-		ops, err := w.registry.List()
+func (w *Workflows) LedgerRollup() WorkflowRun { return w.mustRun("wf-onb-ledger-rollup", nil) }
+
+func (w *Workflows) ledgerRollup() (any, error) {
+	ops, err := w.registry.List()
+	if err != nil {
+		return nil, err
+	}
+	perAgent := map[string]int{}
+	for _, op := range ops {
+		if op.Status == "nin_verified" || op.Status == "tin_provisioned" || op.Status == "graduated" {
+			perAgent[op.AgentID]++
+		}
+	}
+	poolID, err := w.ensurePoolAccount()
+	if err != nil {
+		return nil, err
+	}
+	var total uint64
+	for agentID, n := range perAgent {
+		acctID, err := w.ensureCommissionAccount(agentID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		perAgent := map[string]int{}
-		for _, op := range ops {
-			if op.Status == "nin_verified" || op.Status == "tin_provisioned" || op.Status == "graduated" {
-				perAgent[op.AgentID]++
-			}
-		}
-		poolID, err := w.ensurePoolAccount()
-		if err != nil {
-			return err
-		}
-		var total uint64
-		for agentID, n := range perAgent {
-			acctID, err := w.ensureCommissionAccount(agentID)
-			if err != nil {
-				return err
-			}
-			accrual := uint64(n) * commissionPerVerifiedKobo
-			total += accrual
-			w.step(run, "agent %s: %d verified operators -> accrual %d kobo (acct %s)", agentID, n, accrual, acctID[:12])
-		}
-		run.Result = map[string]any{"agents": len(perAgent), "pool_account": poolID, "accrued_kobo": total}
-		w.bus.Publish("nrs.onb.ledger.rollup.v1", events.New("nrs.onb.ledger.rollup.v1", serviceName, "", "", map[string]any{
-			"agents": len(perAgent), "accrued_kobo": total,
-		}))
-		return nil
-	})
+		accrual := uint64(n) * commissionPerVerifiedKobo
+		total += accrual
+		_ = acctID
+	}
+	res := map[string]any{"agents": len(perAgent), "pool_account": poolID, "accrued_kobo": total}
+	w.bus.Publish("nrs.onb.ledger.rollup.v1", events.New("nrs.onb.ledger.rollup.v1", serviceName, "", "", map[string]any{
+		"agents": len(perAgent), "accrued_kobo": total,
+	}))
+	return res, nil
 }
 
 // CommissionSettlement (wf-onb-commission-settlement): settle accrued agent
 // commissions on ledger 700 (code 5 settle) from the NRS pool. Uses the dev
 // LedgerClient when LEDGER_URL is unset.
 func (w *Workflows) CommissionSettlement() WorkflowRun {
-	return w.record("wf-onb-commission-settlement", nil, func(run *WorkflowRun) error {
-		ops, err := w.registry.List()
+	return w.mustRun("wf-onb-commission-settlement", nil)
+}
+
+func (w *Workflows) commissionSettlement() (any, error) {
+	ops, err := w.registry.List()
+	if err != nil {
+		return nil, err
+	}
+	perAgent := map[string]int{}
+	for _, op := range ops {
+		if op.Status == "nin_verified" || op.Status == "tin_provisioned" || op.Status == "graduated" {
+			perAgent[op.AgentID]++
+		}
+	}
+	poolID, err := w.ensurePoolAccount()
+	if err != nil {
+		return nil, err
+	}
+	// fund the pool first (treasury topup, code 4) so settlement is funded
+	var total uint64
+	for _, n := range perAgent {
+		total += uint64(n) * commissionPerVerifiedKobo
+	}
+	if total == 0 {
+		return map[string]any{"settled_kobo": 0}, nil
+	}
+	treasuryID := ledger.AccountID(nsCommissionsPool, 2)
+	if _, err := w.ledger.Balance(treasuryID); err != nil {
+		if err := w.ledger.CreateAccounts([]ledger.Account{{ID: treasuryID, Ledger: ledger.LedgerCommissions, Code: 4, UserData: "nrs-treasury-offset"}}); err != nil && err != ledger.ErrAccountExists {
+			return nil, err
+		}
+	}
+	if _, err := w.ledger.Transfer(ledger.Transfer{
+		DebitAccountID: treasuryID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
+		Code: ledger.CodeTopup, Amount: total, UserData: "pool-funding",
+	}); err != nil {
+		return nil, fmt.Errorf("pool funding: %w", err)
+	}
+	settled := map[string]uint64{}
+	for agentID, n := range perAgent {
+		acctID, err := w.ensureCommissionAccount(agentID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		perAgent := map[string]int{}
-		for _, op := range ops {
-			if op.Status == "nin_verified" || op.Status == "tin_provisioned" || op.Status == "graduated" {
-				perAgent[op.AgentID]++
-			}
-		}
-		poolID, err := w.ensurePoolAccount()
-		if err != nil {
-			return err
-		}
-		// fund the pool first (treasury topup, code 4) so settlement is funded
-		var total uint64
-		for _, n := range perAgent {
-			total += uint64(n) * commissionPerVerifiedKobo
-		}
-		if total == 0 {
-			w.step(run, "no verified operators; nothing to settle")
-			run.Result = map[string]any{"settled_kobo": 0}
-			return nil
-		}
-		treasuryID := ledger.AccountID(nsCommissionsPool, 2)
-		if _, err := w.ledger.Balance(treasuryID); err != nil {
-			if err := w.ledger.CreateAccounts([]ledger.Account{{ID: treasuryID, Ledger: ledger.LedgerCommissions, Code: 4, UserData: "nrs-treasury-offset"}}); err != nil && err != ledger.ErrAccountExists {
-				return err
-			}
-		}
+		amount := uint64(n) * commissionPerVerifiedKobo
 		if _, err := w.ledger.Transfer(ledger.Transfer{
-			DebitAccountID: treasuryID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
-			Code: ledger.CodeTopup, Amount: total, UserData: "pool-funding",
+			DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
+			Code: ledger.CodeSettle, Amount: amount, UserData: "commission:" + agentID,
 		}); err != nil {
-			return fmt.Errorf("pool funding: %w", err)
+			return nil, fmt.Errorf("settle agent %s: %w", agentID, err)
 		}
-		w.step(run, "pool funded with %d kobo (ledger 700, code 4 topup)", total)
-		settled := map[string]uint64{}
-		for agentID, n := range perAgent {
-			acctID, err := w.ensureCommissionAccount(agentID)
-			if err != nil {
-				return err
-			}
-			amount := uint64(n) * commissionPerVerifiedKobo
-			txID, err := w.ledger.Transfer(ledger.Transfer{
-				DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
-				Code: ledger.CodeSettle, Amount: amount, UserData: "commission:" + agentID,
-			})
-			if err != nil {
-				return fmt.Errorf("settle agent %s: %w", agentID, err)
-			}
-			settled[agentID] = amount
-			w.step(run, "settled %d kobo to agent %s (tx %s)", amount, agentID, txID[:12])
-		}
-		w.bus.Publish("nrs.onb.commission.settled.v1", events.New("nrs.onb.commission.settled.v1", serviceName, "", "", map[string]any{
-			"settled": settled, "total_kobo": total,
-		}))
-		run.Result = map[string]any{"settled": settled, "total_kobo": total, "ledger": ledger.LedgerCommissions}
-		return nil
-	})
+		settled[agentID] = amount
+	}
+	w.bus.Publish("nrs.onb.commission.settled.v1", events.New("nrs.onb.commission.settled.v1", serviceName, "", "", map[string]any{
+		"settled": settled, "total_kobo": total,
+	}))
+	return map[string]any{"settled": settled, "total_kobo": total, "ledger": ledger.LedgerCommissions}, nil
 }
 
 // FilingReminders (wf-onb-filing-reminders): queue reminders for provisioned
 // operators with no filing activity (dev: emits reminder events).
-func (w *Workflows) FilingReminders() WorkflowRun {
-	return w.record("wf-onb-filing-reminders", nil, func(run *WorkflowRun) error {
-		ops, err := w.registry.List()
-		if err != nil {
-			return err
+func (w *Workflows) FilingReminders() WorkflowRun { return w.mustRun("wf-onb-filing-reminders", nil) }
+
+func (w *Workflows) filingReminders() (any, error) {
+	ops, err := w.registry.List()
+	if err != nil {
+		return nil, err
+	}
+	queued := 0
+	for _, op := range ops {
+		if op.Status != "tin_provisioned" {
+			continue
 		}
-		queued := 0
-		for _, op := range ops {
-			if op.Status != "tin_provisioned" {
-				continue
-			}
-			created, _ := time.Parse(time.RFC3339, op.CreatedAt)
-			if time.Since(created) < 24*time.Hour {
-				continue // grace period
-			}
-			w.bus.Publish("nrs.onb.reminder.queued.v1", events.New("nrs.onb.reminder.queued.v1", serviceName, "", "", map[string]any{
-				"operator_id": op.ID, "tin_hash": op.TINHash, "phone": op.Phone, "channel": "sms",
-			}))
-			queued++
+		created, _ := time.Parse(time.RFC3339, op.CreatedAt)
+		if time.Since(created) < 24*time.Hour {
+			continue // grace period
 		}
-		w.step(run, "queued %d filing reminders", queued)
-		run.Result = map[string]any{"queued": queued}
-		return nil
-	})
+		w.bus.Publish("nrs.onb.reminder.queued.v1", events.New("nrs.onb.reminder.queued.v1", serviceName, "", "", map[string]any{
+			"operator_id": op.ID, "tin_hash": op.TINHash, "phone": op.Phone, "channel": "sms",
+		}))
+		queued++
+	}
+	return map[string]any{"queued": queued}, nil
 }
 
 // MBSGraduate (wf-onb-mbs-graduate): operators whose estimated turnover
 // exceeds the presumptive ceiling graduate to MBS (standard regime).
-func (w *Workflows) MBSGraduate() WorkflowRun {
+func (w *Workflows) MBSGraduate() WorkflowRun { return w.mustRun("wf-onb-mbs-graduate", nil) }
+
+func (w *Workflows) mbsGraduate() (any, error) {
 	type gradInput struct {
 		OperatorID            string `json:"operator_id"`
 		EstimatedTurnoverKobo uint64 `json:"estimated_turnover_kobo"`
 	}
-	return w.record("wf-onb-mbs-graduate", nil, func(run *WorkflowRun) error {
-		// dev input channel: graduation candidates staged via the API
-		var staged []gradInput
-		if err := w.st.List("graduation_candidates", &staged); err != nil {
-			return err
+	var staged []gradInput
+	if err := w.st.List("graduation_candidates", &staged); err != nil {
+		return nil, err
+	}
+	graduated := 0
+	for _, g := range staged {
+		if g.EstimatedTurnoverKobo <= presumptiveCeilingKobo {
+			continue
 		}
-		graduated := 0
-		for _, g := range staged {
-			if g.EstimatedTurnoverKobo <= presumptiveCeilingKobo {
-				continue
-			}
-			op, ok, err := w.registry.Get(g.OperatorID)
-			if err != nil || !ok {
-				continue
-			}
-			op.Status = "graduated"
-			if err := w.registry.Update(op); err != nil {
-				return err
-			}
-			w.bus.Publish("nrs.onb.mbs.graduate.v1", events.New("nrs.onb.mbs.graduate.v1", serviceName, "", "", map[string]any{
-				"operator_id": op.ID, "tin_hash": op.TINHash, "estimated_turnover_kobo": g.EstimatedTurnoverKobo,
-			}))
-			graduated++
-			w.step(run, "operator %s graduated to MBS (turnover %d kobo > ceiling %d)", op.ID, g.EstimatedTurnoverKobo, presumptiveCeilingKobo)
+		op, ok, err := w.registry.Get(g.OperatorID)
+		if err != nil || !ok {
+			continue
 		}
-		run.Result = map[string]any{"graduated": graduated, "candidates": len(staged)}
-		return nil
-	})
+		if err := w.registry.Transition(&op, "graduated", "wf-onb-mbs-graduate"); err != nil {
+			continue // illegal transition (e.g. not yet tin_provisioned); skip
+		}
+		w.bus.Publish("nrs.onb.mbs.graduate.v1", events.New("nrs.onb.mbs.graduate.v1", serviceName, "", "", map[string]any{
+			"operator_id": op.ID, "tin_hash": op.TINHash, "estimated_turnover_kobo": g.EstimatedTurnoverKobo,
+		}))
+		graduated++
+	}
+	return map[string]any{"graduated": graduated, "candidates": len(staged)}, nil
 }
