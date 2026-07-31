@@ -166,6 +166,19 @@ func TestWebhookSignature(t *testing.T) {
 
 func TestFloatOverdraftEnforced(t *testing.T) {
 	ts := newTestStack(t)
+	// fund the float treasury first (treasury now enforces
+	// DEBITS_MUST_NOT_EXCEED_CREDITS — audit Flow 4c)
+	treasury, err := ts.float.treasuryAccountID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := ledger.AccountID(nsFloatTreasury, 99)
+	if err := ts.lc.CreateAccounts([]ledger.Account{{ID: src, Ledger: ledger.LedgerAgentFloat, Code: 4, UserData: "funding"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.lc.Transfer(ledger.Transfer{DebitAccountID: src, CreditAccountID: treasury, Ledger: ledger.LedgerAgentFloat, Code: ledger.CodeTopup, Amount: 5000000, UserData: "funding"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ts.float.Topup("agent-1", 1000000, "seed"); err != nil {
 		t.Fatal(err)
 	}

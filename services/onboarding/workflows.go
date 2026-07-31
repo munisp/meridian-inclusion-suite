@@ -237,10 +237,45 @@ func (w *Workflows) LedgerRollup() WorkflowRun {
 }
 
 // CommissionSettlement (wf-onb-commission-settlement): settle accrued agent
-// commissions on ledger 700 (code 5 settle) from the NRS pool. Uses the dev
-// LedgerClient when LEDGER_URL is unset.
+// commissions on ledger 700 (code 5 settle) from the NRS pool for the
+// current period (YYYY-MM). See CommissionSettlementForPeriod.
 func (w *Workflows) CommissionSettlement() WorkflowRun {
-	return w.record("wf-onb-commission-settlement", nil, func(run *WorkflowRun) error {
+	return w.CommissionSettlementForPeriod(time.Now().UTC().Format("2006-01"))
+}
+
+// CommissionPayout is the durable per-(agent, period) payout marker — the
+// dedup record that makes a re-run of a settled period a no-op.
+type CommissionPayout struct {
+	AgentID    string `json:"agent_id"`
+	Period     string `json:"period"`
+	AmountKobo uint64 `json:"amount_kobo"`
+	TransferID string `json:"transfer_id"`
+	PaidAt     string `json:"paid_at"`
+}
+
+func payoutKey(agentID, period string) string { return agentID + ":" + period }
+
+func (w *Workflows) payoutMarked(agentID, period string) bool {
+	var p CommissionPayout
+	ok, err := w.st.Get("commission_payouts", payoutKey(agentID, period), &p)
+	return err == nil && ok
+}
+
+func (w *Workflows) markPayout(agentID, period string, amount uint64, transferID string) error {
+	return w.st.Put("commission_payouts", payoutKey(agentID, period), CommissionPayout{
+		AgentID: agentID, Period: period, AmountKobo: amount, TransferID: transferID, PaidAt: nowRFC3339(),
+	})
+}
+
+// CommissionSettlementForPeriod pays accrued agent commissions for one
+// period. Hardened as a funds flow (audit Flow 4 / fix #8):
+//   - per-period dedup marker per agent: a re-run for the same period is a
+//     no-op (200 replay), never a double payout;
+//   - each payout is a pending -> post saga (deterministic transfer ids) so
+//     a crash mid-run is safely resumable/replayable;
+//   - the pool-funding leg is likewise idempotent per period.
+func (w *Workflows) CommissionSettlementForPeriod(period string) WorkflowRun {
+	return w.record("wf-onb-commission-settlement", map[string]any{"period": period}, func(run *WorkflowRun) error {
 		ops, err := w.registry.List()
 		if err != nil {
 			return err
@@ -271,26 +306,58 @@ func (w *Workflows) CommissionSettlement() WorkflowRun {
 				return err
 			}
 		}
-		if _, err := w.ledger.Transfer(ledger.Transfer{
-			DebitAccountID: treasuryID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
-			Code: ledger.CodeTopup, Amount: total, UserData: "pool-funding",
-		}); err != nil {
-			return fmt.Errorf("pool funding: %w", err)
+		// Fund the pool only for payouts not already marked settled this
+		// period (the funding leg is idempotent per period+amount set).
+		var fundTotal uint64
+		for agentID, n := range perAgent {
+			if w.payoutMarked(agentID, period) {
+				continue
+			}
+			fundTotal += uint64(n) * commissionPerVerifiedKobo
 		}
-		w.step(run, "pool funded with %d kobo (ledger 700, code 4 topup)", total)
+		if fundTotal > 0 {
+			if _, err := w.ledger.Transfer(ledger.Transfer{
+				ID: ledger.DeterministicTransferID("comm-fund:" + period + ":" + fmt.Sprint(fundTotal)),
+				DebitAccountID: treasuryID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
+				Code: ledger.CodeTopup, Amount: fundTotal, UserData: "pool-funding:" + period,
+			}); err != nil {
+				return fmt.Errorf("pool funding: %w", err)
+			}
+			w.step(run, "pool funded with %d kobo (ledger 700, code 4 topup)", fundTotal)
+		} else {
+			w.step(run, "pool funding not needed (all payouts already settled for %s)", period)
+		}
 		settled := map[string]uint64{}
 		for agentID, n := range perAgent {
+			amount := uint64(n) * commissionPerVerifiedKobo
+			if w.payoutMarked(agentID, period) {
+				w.step(run, "agent %s already paid for %s (dedup marker) — no-op", agentID, period)
+				settled[agentID] = amount
+				continue
+			}
 			acctID, err := w.ensureCommissionAccount(agentID)
 			if err != nil {
 				return err
 			}
-			amount := uint64(n) * commissionPerVerifiedKobo
-			txID, err := w.ledger.Transfer(ledger.Transfer{
-				DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
-				Code: ledger.CodeSettle, Amount: amount, UserData: "commission:" + agentID,
-			})
+			// payout saga: pending -> mark -> post (compensation voids)
+			pendID := ledger.DeterministicTransferID("comm-pending:" + agentID + ":" + period)
+			postID := ledger.DeterministicTransferID("comm-post:" + agentID + ":" + period)
+			if _, err := w.ledger.PendingTransfer(ledger.Transfer{
+				ID: pendID, DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
+				Code: ledger.CodeSettle, Amount: amount, UserData: "commission:" + agentID + ":" + period,
+			}); err != nil {
+				return fmt.Errorf("settle agent %s (pending): %w", agentID, err)
+			}
+			// durable marker BEFORE the post: crash after the post replays
+			// via PostPendingAs idempotency, never a second transfer.
+			if err := w.markPayout(agentID, period, amount, postID); err != nil {
+				_, _ = w.ledger.VoidPending(pendID) // compensation
+				return err
+			}
+			txID, err := w.ledger.PostPendingAs(pendID, postID, amount)
 			if err != nil {
-				return fmt.Errorf("settle agent %s: %w", agentID, err)
+				_, _ = w.ledger.VoidPending(pendID) // compensation
+				return fmt.Errorf("settle agent %s (post): %w", agentID, err)
 			}
 			settled[agentID] = amount
 			w.step(run, "settled %d kobo to agent %s (tx %s)", amount, agentID, txID[:12])
