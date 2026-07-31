@@ -122,3 +122,11 @@ func (a *PSSPHTTPAdapter) Verify(reference string) (CaptureResponse, error) {
 func (a *PSSPHTTPAdapter) Void(reference string) error {
 	return a.post("/payments/void", map[string]any{"reference": reference}, nil)
 }
+
+// Refund reverses a settled capture: POST /payments/refund (saga
+// compensation when the ledger/certificate leg fails after capture).
+func (a *PSSPHTTPAdapter) Refund(reference string, amountKobo uint64) error {
+	return a.post("/payments/refund", map[string]any{
+		"reference": reference, "amount_kobo": amountKobo,
+	}, nil)
+}

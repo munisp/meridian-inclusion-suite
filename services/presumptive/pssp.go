@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 )
 
 // PSSP adapter interface (SPEC §4 T12: Remita/eTranzact/Flutterwave-class
@@ -42,6 +43,8 @@ type PSSPAdapter interface {
 	Authorise(req AuthoriseRequest) (AuthoriseResponse, error)
 	Capture(reference string, amountKobo uint64) (CaptureResponse, error)
 	Void(reference string) error
+	// Refund reverses a settled capture (saga compensation).
+	Refund(reference string, amountKobo uint64) error
 }
 
 // psspSim is the shared deterministic simulator core; each provider differs in
@@ -106,6 +109,17 @@ func (s *psspSim) Void(reference string) error {
 	return nil
 }
 
+// Refund reverses a settled capture (saga compensation path).
+func (s *psspSim) Refund(reference string, amountKobo uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.settled[reference] {
+		return fmt.Errorf("%s: capture %s not settled; nothing to refund", s.name, reference)
+	}
+	delete(s.settled, reference)
+	return nil
+}
+
 // PSSPHub routes to provider adapters.
 type PSSPHub struct{ adapters map[string]PSSPAdapter }
 
@@ -137,15 +151,13 @@ func (h *PSSPHub) Adapter(provider string) (PSSPAdapter, error) {
 }
 
 // webhookSecret is the shared secret for PSSP webhook HMAC signatures:
-// PSSP_API_KEY (prod) → PSSP_WEBHOOK_SECRET → dev default.
+// PSSP_API_KEY (prod) → PSSP_WEBHOOK_SECRET → dev default (dev profile only,
+// fail-closed in profile=prod via keyx).
 func webhookSecret() string {
 	if s := os.Getenv("PSSP_API_KEY"); s != "" {
 		return s
 	}
-	if s := os.Getenv("PSSP_WEBHOOK_SECRET"); s != "" {
-		return s
-	}
-	return "meridian-dev-pssp-webhook-secret"
+	return keyx.MustKey("PSSP_WEBHOOK_SECRET", "meridian-dev-pssp-webhook-secret")
 }
 
 // hmacHex computes hex HMAC-SHA256(key, value).
