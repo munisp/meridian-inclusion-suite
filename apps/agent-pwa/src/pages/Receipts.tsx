@@ -1,15 +1,30 @@
 import { useEffect, useState } from 'react'
 import { saveReceipt, listReceipts, OfflineReceipt } from '../db'
-import { naira } from '../api'
+import { naira, enrollDevice } from '../api'
+
+// Device signing key, generated once per device and ENROLLED server-side
+// (audit fix #6): the server binds it to (agent_id, device_id) so offline
+// receipts are verifiable via POST /v1/receipts/verify.
+export function deviceKey(): string {
+  const k = localStorage.getItem('agent.deviceKey')
+  if (k) return k
+  const nk = crypto.randomUUID() + crypto.randomUUID()
+  localStorage.setItem('agent.deviceKey', nk)
+  return nk
+}
+
+function deviceId(): string {
+  const d = localStorage.getItem('agent.deviceId')
+  if (d) return d
+  const nd = 'dev-' + crypto.randomUUID()
+  localStorage.setItem('agent.deviceId', nd)
+  return nd
+}
 
 // HMAC-style offline signature: SHA-256(device key | payload). Verified
-// server-side on sync (cash_receipt_offline audit trail).
+// server-side against the enrolled device key.
 async function sign(payload: string): Promise<string> {
-  const key = localStorage.getItem('agent.deviceKey') || (() => {
-    const k = crypto.randomUUID()
-    localStorage.setItem('agent.deviceKey', k)
-    return k
-  })()
+  const key = deviceKey()
   const data = new TextEncoder().encode(key + '|' + payload)
   const digest = await crypto.subtle.digest('SHA-256', data)
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -22,7 +37,17 @@ export default function Receipts() {
   const [receipts, setReceipts] = useState<OfflineReceipt[]>([])
   const [issued, setIssued] = useState<OfflineReceipt | null>(null)
 
-  useEffect(() => { listReceipts().then(setReceipts) }, [])
+  const [enrolled, setEnrolled] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    listReceipts().then(setReceipts)
+    // Enrol this device's key with the server (best effort offline; retried
+    // on every mount until it succeeds).
+    const agentId = localStorage.getItem('agent.id') || 'agent-demo-1'
+    enrollDevice(agentId, deviceId(), deviceKey())
+      .then(() => setEnrolled(true))
+      .catch(() => setEnrolled(false))
+  }, [])
 
   async function issue(e: React.FormEvent) {
     e.preventDefault()
@@ -43,6 +68,10 @@ export default function Receipts() {
     <div className="space-y-4">
       <div className="card">
         <h2 className="font-bold text-sand-800 mb-3">Offline cash receipt</h2>
+        {enrolled === false && (
+          <p className="text-xs text-amber-800 mb-2">Device key not yet enrolled with the server — receipts will verify once enrolment succeeds (retried automatically when online).</p>
+        )}
+        {enrolled && <p className="text-xs text-green-800 mb-2">Device enrolled — receipts are server-verifiable.</p>}
         <form onSubmit={issue} className="space-y-3">
           <div>
             <label className="label">Payer name</label>
