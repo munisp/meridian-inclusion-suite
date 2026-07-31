@@ -170,9 +170,9 @@ func (e *Engine) renderCurrent(sess *Session, lastInput string) (string, bool, e
 			}
 			sess.Menu = menu.Next
 		case "end":
-			return render(menu.Text, sess), false, nil
+			return render(localizedText(sess, menu), sess), false, nil
 		default: // options | input
-			return render(menu.Text, sess), true, nil
+			return render(localizedText(sess, menu), sess), true, nil
 		}
 	}
 	return "Session error.", false, fmt.Errorf("menu chain too deep")

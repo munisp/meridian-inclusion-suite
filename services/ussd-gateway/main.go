@@ -5,8 +5,11 @@ import (
 	"net/http"
 	"os"
 
+	"strings"
+
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
+	kvstore "github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
 
 func main() {
@@ -16,7 +19,24 @@ func main() {
 	}
 	bus := events.NewBusFromEnv(serviceName)
 	engine := NewEngine(graph, RegisterActions(busAdapter{bus: bus}))
-	store := NewInMemSessionStore(graph.SessionTTLSeconds)
+	// Session store: Redis when REDIS_URL is set (multi-node), otherwise the
+	// durable embedded-KV store (restart-safe; enables session resume), with
+	// in-mem as the bare-dev last resort when the KV store can't open.
+	var store SessionStore
+	if addr := os.Getenv("REDIS_URL"); addr != "" {
+		rs, err := NewRedisSessionStore(strings.TrimPrefix(addr, "redis://"), graph.SessionTTLSeconds)
+		if err != nil {
+			log.Fatalf("REDIS_URL set but unusable (fail closed): %v", err)
+		}
+		store = rs
+		log.Printf("profile=prod component=ussd-sessions store=redis addr=%s", addr)
+	} else if kv, err := kvstore.OpenFromEnvProfile(); err == nil {
+		store = NewKVSessionStore(kv, graph.SessionTTLSeconds)
+		log.Printf("profile=dev component=ussd-sessions store=embedded-kv (resume enabled)")
+	} else {
+		store = NewInMemSessionStore(graph.SessionTTLSeconds)
+		log.Printf("profile=dev component=ussd-sessions store=in-mem (no resume): %v", err)
+	}
 
 	srv := &server{graph: graph, engine: engine, store: store, bus: bus, notifier: NewAggregatorNotifierFromEnv()}
 
