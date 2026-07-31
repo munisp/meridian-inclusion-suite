@@ -29,6 +29,9 @@ func main() {
 	floats := NewFloatService(st, lc)
 	pay := NewPaymentService(st, lc, hub, engine, gates, certs, bus)
 	wf := NewPSMWorkflows(st, pay, floats, engine, gates, lc, bus)
+	// Recovery worker: resume/compensate interrupted capture sagas and
+	// expire abandoned pending intents (boot sweep + interval).
+	NewRecoverySweeper(pay, lc, bus).StartRecovery(nil)
 
 	srv := &server{
 		pay:     pay,

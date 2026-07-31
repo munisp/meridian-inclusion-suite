@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
@@ -21,8 +20,12 @@ func certHMACKey() string {
 }
 
 // certSerial issues human-verifiable serials: PSM-YYYY-XXXXXXXXXX.
-func certSerial() string {
-	return fmt.Sprintf("PSM-%d-%s", time.Now().UTC().Year(), strings.ToUpper(ids.New()[:10]))
+// Deterministic per payment id so certificate issuance is idempotent: a
+// retried/recovered capture re-issues the SAME certificate instead of a
+// duplicate serial for one payment.
+func certSerial(paymentID string) string {
+	sum := sha256.Sum256([]byte("psm-cert:" + paymentID))
+	return fmt.Sprintf("PSM-%d-%s", time.Now().UTC().Year(), strings.ToUpper(hex.EncodeToString(sum[:])[:10]))
 }
 
 // canonicalCertPayload is the signed byte string (pipe-delimited, stable).
@@ -49,10 +52,16 @@ func NewCertificateService(st *store.Store) *CertificateService {
 	return &CertificateService{st: st}
 }
 
-// Issue mints a certificate for a captured payment.
+// Issue mints a certificate for a captured payment. Idempotent per payment:
+// if a certificate already exists for p.ID it is returned unchanged.
 func (s *CertificateService) Issue(p Payment) (Certificate, error) {
+	serial := certSerial(p.ID)
+	var existing Certificate
+	if ok, err := s.st.Get("certificates", serial, &existing); err == nil && ok && existing.PaymentID == p.ID {
+		return existing, nil // idempotent replay
+	}
 	c := Certificate{
-		Serial:          certSerial(),
+		Serial:          serial,
 		TINHash:         p.TINHash,
 		State:           p.State,
 		Band:            p.TurnoverBand,

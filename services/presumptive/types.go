@@ -28,6 +28,7 @@ type Payment struct {
 	Status            string `json:"status"`   // intent|pending_authorisation|authorised|captured|voided|failed
 	PendingTransferID string `json:"pending_transfer_id,omitempty"`
 	PostTransferID    string `json:"post_transfer_id,omitempty"`
+	FeeKobo           uint64 `json:"fee_kobo,omitempty"` // PSSP fee leg (gross - settled)
 	PSSPRef           string `json:"pssp_ref,omitempty"`
 	CertificateSerial string `json:"certificate_serial,omitempty"`
 	RulePackVersion   string `json:"rule_pack_version"`
@@ -60,15 +61,21 @@ type FloatAccount struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// FloatMovement records a topup/debit for the audit trail.
+// FloatMovement records a topup/debit for the audit trail. ID is
+// deterministic per (kind, reference) — the reference dedup key. Status
+// tracks the pending->post saga so the recovery sweeper can finish or void
+// movements interrupted by a crash.
 type FloatMovement struct {
-	ID         string `json:"id"`
-	AgentID    string `json:"agent_id"`
-	Kind       string `json:"kind"` // topup|debit
-	AmountKobo uint64 `json:"amount_kobo"`
-	Reference  string `json:"reference"`
-	TransferID string `json:"transfer_id"`
-	CreatedAt  string `json:"created_at"`
+	ID                string `json:"id"`
+	AgentID           string `json:"agent_id"`
+	Kind              string `json:"kind"` // topup|debit
+	AmountKobo        uint64 `json:"amount_kobo"`
+	Reference         string `json:"reference"`
+	PendingTransferID string `json:"pending_transfer_id,omitempty"`
+	TransferID        string `json:"transfer_id"`
+	Status            string `json:"status"` // pending|posted|voided
+	FailReason        string `json:"fail_reason,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }
 
 // GateState mirrors the reg-watch gate model (fallback local gate file).

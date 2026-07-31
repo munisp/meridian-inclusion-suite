@@ -87,10 +87,12 @@ func (a *PSSPHTTPAdapter) Authorise(req AuthoriseRequest) (AuthoriseResponse, er
 }
 
 // Capture settles a previously authorised payment: POST /payments/capture.
-func (a *PSSPHTTPAdapter) Capture(reference string, amountKobo uint64) (CaptureResponse, error) {
+// The Idempotency-Key is sent both as a header and in the body so the
+// provider dedupes retries (crash between provider capture and our persist).
+func (a *PSSPHTTPAdapter) Capture(reference string, amountKobo uint64, idempotencyKey string) (CaptureResponse, error) {
 	var out CaptureResponse
 	err := a.post("/payments/capture", map[string]any{
-		"reference": reference, "amount_kobo": amountKobo,
+		"reference": reference, "amount_kobo": amountKobo, "idempotency_key": idempotencyKey,
 	}, &out)
 	if err != nil {
 		log.Printf("pssp adapter: capture failed reference=%s: %v", reference, err)

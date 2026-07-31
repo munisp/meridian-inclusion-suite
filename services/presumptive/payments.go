@@ -14,7 +14,34 @@ import (
 const (
 	nsPSMPayer       uint64 = 200000100000 // payer (operator) holding accounts
 	nsPSMCollections uint64 = 200000000001 // NRS presumptive collections account
+	nsPSPFeeIncome   uint64 = 200000000002 // PSSP fee income (fee leg, audit fix #4)
 )
+
+// idempotencyTTL bounds how long an idempotency-key replay window stays open.
+const idempotencyTTL = 24 * time.Hour
+
+// IdempotencyRecord binds a caller-supplied Idempotency-Key to the payment
+// it created, so client retries replay the original response instead of
+// creating a second payment + second pending hold.
+type IdempotencyRecord struct {
+	Key       string `json:"key"`
+	PaymentID string `json:"payment_id"`
+	CreatedAt string `json:"created_at"`
+}
+
+// lookupIdempotency returns the payment id previously created for key, if
+// the record exists and is younger than idempotencyTTL.
+func (s *PaymentService) lookupIdempotency(key string) (string, bool) {
+	var rec IdempotencyRecord
+	ok, err := s.st.Get("idempotency", key, &rec)
+	if err != nil || !ok {
+		return "", false
+	}
+	if ts, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil && time.Since(ts) > idempotencyTTL {
+		return "", false // expired: a fresh attempt is allowed
+	}
+	return rec.PaymentID, true
+}
 
 // PaymentService runs the payment lifecycle:
 // intent -> pending transfer (ledger 200, code 1 authorise) -> PSSP authorise
@@ -74,6 +101,10 @@ type IntentRequest struct {
 	Period             string `json:"period"`   // e.g. "2026"
 	Provider           string `json:"provider"` // remita|etranzact|flutterwave
 	Monthly            bool   `json:"monthly"`  // pay monthly instalment instead of annual
+	// IdempotencyKey dedupes client retries (Idempotency-Key header):
+	// a replayed key returns the originally created payment (200 replay),
+	// never a second pending hold.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // CreateIntent enforces the presumptive gate, evaluates the band engine and
@@ -88,6 +119,14 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	}
 	if in.TINHash == "" || in.State == "" {
 		return Payment{}, fmt.Errorf("tin_hash and state are required")
+	}
+	if in.IdempotencyKey != "" {
+		if pid, ok := s.lookupIdempotency(in.IdempotencyKey); ok {
+			p, found, err := s.get(pid)
+			if err == nil && found {
+				return p, nil // idempotent replay (200)
+			}
+		}
 	}
 	if _, err := s.hub.Adapter(in.Provider); err != nil {
 		return Payment{}, err
@@ -133,8 +172,11 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 		CreatedAt:       nowRFC3339(),
 		UpdatedAt:       nowRFC3339(),
 	}
-	// pending transfer = authorise hold on ledger 200
+	// pending transfer = authorise hold on ledger 200. Deterministic id:
+	// a retried PendingTransfer with the same id replays instead of
+	// creating a second hold (ledger dedup on client-supplied ids).
 	ptID, err := s.lc.PendingTransfer(ledger.Transfer{
+		ID:              ledger.DeterministicTransferID("psm-intent:" + p.ID),
 		DebitAccountID:  payer,
 		CreditAccountID: collections,
 		Ledger:          ledger.LedgerPSMPayments,
@@ -149,6 +191,11 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	p.Status = "pending_authorisation"
 	if err := s.st.Put("payments", p.ID, p); err != nil {
 		return Payment{}, err
+	}
+	if in.IdempotencyKey != "" {
+		_ = s.st.Put("idempotency", in.IdempotencyKey, IdempotencyRecord{
+			Key: in.IdempotencyKey, PaymentID: p.ID, CreatedAt: nowRFC3339(),
+		})
 	}
 	s.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{
 		"payment_id": p.ID, "status": p.Status, "amount_kobo": p.AmountKobo, "tin_hash": p.TINHash, "band": p.TurnoverBand,
@@ -209,7 +256,10 @@ func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error)
 		return Payment{}, Certificate{}, fmt.Errorf("payment %s is %s; cannot capture", paymentID, p.Status)
 	}
 	adapter, _ := s.hub.Adapter(p.Provider)
-	capRes, err := adapter.Capture(p.PSSPRef, p.AmountKobo)
+	// Idempotency-Key on the PSSP capture: the payment id scopes the key so
+	// a retried capture (crash between PSSP capture and state persist) is a
+	// replay at the provider, not a second charge.
+	capRes, err := adapter.Capture(p.PSSPRef, p.AmountKobo, "capture:"+p.ID)
 	if err != nil || capRes.Status != "captured" {
 		p.Status = "failed"
 		p.FailReason = capRes.Detail
@@ -218,21 +268,29 @@ func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error)
 		return p, Certificate{}, fmt.Errorf("pssp capture failed: %s", capRes.Detail)
 	}
 	// Saga point of no return: the PSSP has the money. Persist the
-	// intermediate state first so a crash here is recoverable by a recon
-	// worker, then run the ledger + certificate steps; any failure triggers
-	// the compensating actions (ledger reversal + PSSP refund).
+	// intermediate state AND the deterministic post/fee transfer ids in ONE
+	// durable write — a crash after the ledger post is then fully resumable
+	// by the recovery sweeper (which re-runs PostPendingAs idempotently),
+	// and compensation always knows the post transfer id.
 	p.Status = "captured_awaiting_post"
+	p.PostTransferID = ledger.DeterministicTransferID("psm-post:" + p.ID)
+	p.FeeKobo = p.AmountKobo - capRes.SettledKobo
 	p.UpdatedAt = nowRFC3339()
 	if err := s.st.Put("payments", p.ID, p); err != nil {
 		_ = s.compensateCapture(&p, "persist captured_awaiting_post: "+err.Error())
 		return p, Certificate{}, fmt.Errorf("persist capture state: %w", err)
 	}
-	postID, err := s.lc.PostPending(p.PendingTransferID, p.AmountKobo)
-	if err != nil {
+	if _, err := s.lc.PostPendingAs(p.PendingTransferID, p.PostTransferID, p.AmountKobo); err != nil {
 		comp := s.compensateCapture(&p, "post pending transfer: "+err.Error())
 		return p, Certificate{}, fmt.Errorf("post pending transfer: %w (compensation: %s)", err, comp)
 	}
-	p.PostTransferID = postID
+	// Fee leg (audit fix #4): the PSSP settles amount-fee; post the fee from
+	// collections to the dedicated PSSP fee-income account so 3-way recon
+	// balances by construction. Deterministic id -> retry-safe.
+	if err := s.postFeeLeg(&p); err != nil {
+		comp := s.compensateCapture(&p, "post fee leg: "+err.Error())
+		return p, Certificate{}, fmt.Errorf("post fee leg: %w (compensation: %s)", err, comp)
+	}
 	cert, err := s.certs.Issue(p)
 	if err != nil {
 		comp := s.compensateCapture(&p, "issue certificate: "+err.Error())
@@ -274,20 +332,27 @@ func (s *PaymentService) compensateCapture(p *Payment, cause string) string {
 		Cause:     cause,
 		CreatedAt: nowRFC3339(),
 	}
-	// 1) ledger reversal (only if the pending transfer was posted)
+	// 1) ledger reversal — only if the post actually landed on the ledger.
+	// PostTransferID is persisted BEFORE PostPending runs (single durable
+	// write), so its presence is not proof of posting; verify with a lookup
+	// so a failed/crashed post is not "reversed" into free money for the
+	// payer. The reversal itself uses a deterministic id (retry-safe).
 	if p.PostTransferID != "" {
-		if payer, err := s.payerAccountID(p.TINHash); err == nil {
-			if collections, err := s.collectionsAccountID(); err == nil {
-				revID, err := s.lc.Transfer(ledger.Transfer{
-					DebitAccountID:  collections,
-					CreditAccountID: payer,
-					Ledger:          ledger.LedgerPSMPayments,
-					Code:            ledger.CodeVoid,
-					Amount:          p.AmountKobo,
-					UserData:        "psm-compensation:" + p.ID,
-				})
-				if err == nil {
-					comp.LedgerReversal = revID
+		if post, err := s.lc.LookupTransfer(p.PostTransferID); err == nil && !post.Pending {
+			if payer, err := s.payerAccountID(p.TINHash); err == nil {
+				if collections, err := s.collectionsAccountID(); err == nil {
+					revID, err := s.lc.Transfer(ledger.Transfer{
+						ID:              ledger.DeterministicTransferID("psm-compensation:" + p.ID),
+						DebitAccountID:  collections,
+						CreditAccountID: payer,
+						Ledger:          ledger.LedgerPSMPayments,
+						Code:            ledger.CodeVoid,
+						Amount:          p.AmountKobo,
+						UserData:        "psm-compensation:" + p.ID,
+					})
+					if err == nil {
+						comp.LedgerReversal = revID
+					}
 				}
 			}
 		}
@@ -317,6 +382,48 @@ func (s *PaymentService) compensateCapture(p *Payment, cause string) string {
 		"compensation_id": comp.ID, "cause": cause, "pssp_refund": comp.PSSPRefund,
 	}))
 	return fmt.Sprintf("compensation %s (ledger_reversal=%s pssp_refund=%s)", comp.ID, comp.LedgerReversal, comp.PSSPRefund)
+}
+
+// feeAccountID returns (creating if needed) the PSSP fee-income account on
+// ledger 200. Fee credits land here so ledger-vs-treasury recon nets out.
+func (s *PaymentService) feeAccountID() (string, error) {
+	id := ledger.AccountID(nsPSPFeeIncome, 1)
+	if _, err := s.lc.Balance(id); err == nil {
+		return id, nil
+	}
+	err := s.lc.CreateAccounts([]ledger.Account{{
+		ID: id, Ledger: ledger.LedgerPSMPayments, Code: 2, UserData: "nrs-pssp-fee-income",
+	}})
+	if err != nil && err != ledger.ErrAccountExists {
+		return "", err
+	}
+	return id, nil
+}
+
+// postFeeLeg moves the PSSP fee (gross amount minus settled amount) from
+// collections to the fee-income account. Idempotent via deterministic id.
+func (s *PaymentService) postFeeLeg(p *Payment) error {
+	if p.FeeKobo == 0 {
+		return nil
+	}
+	collections, err := s.collectionsAccountID()
+	if err != nil {
+		return err
+	}
+	feeAcct, err := s.feeAccountID()
+	if err != nil {
+		return err
+	}
+	_, err = s.lc.Transfer(ledger.Transfer{
+		ID:              ledger.DeterministicTransferID("psm-fee:" + p.ID),
+		DebitAccountID:  collections,
+		CreditAccountID: feeAcct,
+		Ledger:          ledger.LedgerPSMPayments,
+		Code:            ledger.CodeSettle,
+		Amount:          p.FeeKobo,
+		UserData:        "psm-fee:" + p.ID,
+	})
+	return err
 }
 
 // Void voids a payment before capture (PSSP void + ledger void, code 3).

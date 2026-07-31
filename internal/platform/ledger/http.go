@@ -73,9 +73,22 @@ func (h *HTTPClient) PendingTransfer(t Transfer) (string, error) {
 }
 
 func (h *HTTPClient) PostPending(pendingID string, amount uint64) (string, error) {
+	return h.PostPendingAs(pendingID, "", amount)
+}
+
+// PostPendingAs posts a pending transfer under a caller-chosen post id
+// (idempotent replay semantics live server-side; see core ledger service).
+func (h *HTTPClient) PostPendingAs(pendingID, postID string, amount uint64) (string, error) {
 	var out transferResp
-	err := h.do(http.MethodPost, "/v1/transfers/"+pendingID+"/post", map[string]uint64{"amount": amount}, &out)
+	err := h.do(http.MethodPost, "/v1/transfers/"+pendingID+"/post", map[string]any{"amount": amount, "post_id": postID}, &out)
 	return firstID(out), err
+}
+
+// LookupTransfer returns a transfer by id: GET /v1/transfers/{id}.
+func (h *HTTPClient) LookupTransfer(id string) (Transfer, error) {
+	var out Transfer
+	err := h.do(http.MethodGet, "/v1/transfers/"+id, nil, &out)
+	return out, err
 }
 
 func (h *HTTPClient) VoidPending(pendingID string) (string, error) {
