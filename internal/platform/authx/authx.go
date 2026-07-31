@@ -279,6 +279,10 @@ func WriteProblem(w http.ResponseWriter, status int, title, detail string) {
 // for downstream logging/tracing.
 const ClaimsKey = "X-Meridian-Caller"
 
+// RolesKey is the header the middleware sets to the caller's verified,
+// comma-joined roles (mirrors ClaimsKey for the subject).
+const RolesKey = "X-Meridian-Roles"
+
 // Middleware returns §1.3 auth middleware for AUTH_MODE=keycloak. publicPath
 // bypasses auth exactly like the dev verifier.
 func Middleware(v *Verifier, publicPath func(string) bool) func(http.Handler) http.Handler {
@@ -300,6 +304,9 @@ func Middleware(v *Verifier, publicPath func(string) bool) func(http.Handler) ht
 				return
 			}
 			r.Header.Set(ClaimsKey, claims.Subject)
+			// Propagate verified roles so handlers can enforce object- and
+			// role-level authz (audit H-5) without re-verifying the token.
+			r.Header.Set(RolesKey, strings.Join(claims.Roles, ","))
 			next.ServeHTTP(w, r)
 		})
 	}

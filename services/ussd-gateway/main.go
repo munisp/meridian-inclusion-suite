@@ -9,7 +9,9 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	kvstore "github.com/munisp/meridian-inclusion-suite/internal/platform/store"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 func main() {
@@ -18,7 +20,10 @@ func main() {
 		log.Fatalf("menu graph: %v", err)
 	}
 	bus := events.NewBusFromEnv(serviceName)
-	engine := NewEngine(graph, RegisterActions(busAdapter{bus: bus}))
+	actions := RegisterActions(busAdapter{bus: bus})
+	// M-2: USSD PIN gate for sensitive actions (hashed storage, 3-strike lock).
+	registerPINActions(actions, NewPINManager(NewInMemPINStore(), busAdapter{bus: bus}))
+	engine := NewEngine(graph, actions)
 	// Session store: Redis when REDIS_URL is set (multi-node), otherwise the
 	// durable embedded-KV store (restart-safe; enables session resume), with
 	// in-mem as the bare-dev last resort when the KV store can't open.
@@ -38,15 +43,19 @@ func main() {
 		log.Printf("profile=dev component=ussd-sessions store=in-mem (no resume): %v", err)
 	}
 
-	srv := &server{graph: graph, engine: engine, store: store, bus: bus, notifier: NewAggregatorNotifierFromEnv()}
+	srv := &server{graph: graph, engine: engine, store: store, bus: bus, notifier: NewAggregatorNotifierFromEnv(),
+		// M-1: webhook replay guard — fail closed (headers required) in prod.
+		guard: webhookguard.NewGuard("X-Aggregator-Timestamp", "X-Aggregator-Nonce", keyx.Prod(), nil),
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8104"
 	}
-	handler := httpx.CORS(httpx.Auth(func(p string) bool {
+	// M-6/M-7: bounded bodies + origin-scoped CORS wrap the whole chain.
+	handler := httpx.MaxBody(httpx.CORS(httpx.Auth(func(p string) bool {
 		return p == "/healthz" || p == "/readyz" || p == "/webhook/ussd" || p == "/v1/simulate"
-	})(srv.routes()))
+	})(srv.routes())))
 	log.Printf("ussd-gateway %s listening on :%s (service_code=%s ttl=%ds menus=%d)",
 		serviceVersion, port, graph.ServiceCode, graph.SessionTTLSeconds, len(graph.Menus))
 	log.Fatal(http.ListenAndServe(":"+port, handler))

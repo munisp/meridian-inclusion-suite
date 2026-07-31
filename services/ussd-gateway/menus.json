@@ -88,7 +88,53 @@
       "save_as": "nin",
       "validate": "^\\d{11}$",
       "invalid_text": "Invalid NIN. Enter exactly 11 digits:",
-      "next": "onb_tin_status"
+      "next": "pin_gate_tin"
+    },
+    "pin_gate_tin": {
+      "type": "action",
+      "action": "pin.gate_tin_status",
+      "next": "onb_tin_status",
+      "error_next": "onb_error"
+    },
+    "pin_setup_input": {
+      "type": "input",
+      "text": "Create a 4-digit PIN to protect your tax records:",
+      "save_as": "pin_new",
+      "validate": "^\\d{4,6}$",
+      "invalid_text": "PIN must be 4-6 digits. Try again:",
+      "next": "pin_setup_confirm"
+    },
+    "pin_setup_confirm": {
+      "type": "input",
+      "text": "Confirm your PIN:",
+      "save_as": "pin_confirm",
+      "validate": "^\\d{4,6}$",
+      "invalid_text": "PIN must be 4-6 digits. Try again:",
+      "next": "pin_setup_save"
+    },
+    "pin_setup_save": {
+      "type": "action",
+      "action": "pin.setup_save",
+      "next": "onb_tin_status",
+      "error_next": "pin_fail"
+    },
+    "pin_verify_input": {
+      "type": "input",
+      "text": "Enter your PIN to continue:",
+      "save_as": "pin_attempt",
+      "validate": "^\\d{4,6}$",
+      "invalid_text": "PIN must be 4-6 digits. Try again:",
+      "next": "pin_verify_check"
+    },
+    "pin_verify_check": {
+      "type": "action",
+      "action": "pin.verify",
+      "next": "onb_tin_status",
+      "error_next": "pin_fail"
+    },
+    "pin_fail": {
+      "type": "end",
+      "text": "{{error}}"
     },
     "onb_tin_status": {
       "type": "action",

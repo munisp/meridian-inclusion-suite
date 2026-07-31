@@ -20,8 +20,11 @@ func newTestEngine(t *testing.T) (*Engine, SessionStore, *memPub) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("USSD_PIN_PEPPER", "test-pepper") // prod-profile tests fail closed without it
 	pub := &memPub{}
-	eng := NewEngine(graph, RegisterActions(pub))
+	actions := RegisterActions(pub)
+	registerPINActions(actions, NewPINManager(NewInMemPINStore(), pub))
+	eng := NewEngine(graph, actions)
 	return eng, NewInMemSessionStore(graph.SessionTTLSeconds), pub
 }
 
@@ -240,7 +243,8 @@ func TestTINStatusFlow(t *testing.T) {
 	eng0, store0, _ := newTestEngine(t)
 	_, _ = runFlow(t, eng0, store0, "1", "12345678901", "Adaeze Okafor", "1")
 	eng, store, _ := newTestEngine(t)
-	out, _ := runFlow(t, eng, store, "2", "12345678901")
+	// M-2: TIN status is PIN-gated — first visit sets up a PIN (4321).
+	out, _ := runFlow(t, eng, store, "2", "12345678901", "4321", "4321")
 	if !strings.Contains(out, "TIN: 200000001") || !strings.Contains(out, "tin_provisioned") {
 		t.Fatalf("unexpected tin status screen: %s", out)
 	}

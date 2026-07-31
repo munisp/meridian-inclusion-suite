@@ -136,7 +136,30 @@ func (s *server) listOperators(w http.ResponseWriter, r *http.Request) {
 	if ops == nil {
 		ops = []Operator{}
 	}
+	// Object-level authz (audit H-5): non-admin callers see only their own
+	// records in the listing — never the full PII roster.
+	if !httpx.HasRole(r, "admin") {
+		own := []Operator{}
+		for _, op := range ops {
+			if canAccessOperator(r, op) {
+				own = append(own, op)
+			}
+		}
+		ops = own
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operators": ops, "count": len(ops)})
+}
+
+// canAccessOperator enforces object-level authz on operator PII records
+// (audit H-5): admins may access any record; any other caller may access
+// only their own record — identified by the operator ID, phone (MSISDN),
+// or the capturing agent ID matching the authenticated identity.
+func canAccessOperator(r *http.Request, op Operator) bool {
+	if httpx.HasRole(r, "admin") {
+		return true
+	}
+	id := httpx.CallerIdentity(r)
+	return id != "" && (op.ID == id || op.Phone == id || op.AgentID == id)
 }
 
 func (s *server) getOperator(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +172,10 @@ func (s *server) getOperator(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "operator not found")
 		return
 	}
+	if !canAccessOperator(r, op) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden", "operators may only read their own records")
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, op)
 }
 
@@ -156,6 +183,10 @@ func (s *server) patchOperator(w http.ResponseWriter, r *http.Request) {
 	opVal, ok, err := s.registry.Get(r.PathValue("id"))
 	if err != nil || !ok {
 		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "operator not found")
+		return
+	}
+	if !canAccessOperator(r, opVal) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden", "operators may only modify their own records")
 		return
 	}
 	op := &opVal

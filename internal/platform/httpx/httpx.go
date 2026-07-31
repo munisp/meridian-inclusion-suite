@@ -7,9 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/authx"
@@ -44,7 +46,9 @@ func WriteProblem(w http.ResponseWriter, status int, title, detail string) {
 }
 
 func DecodeJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(r.Body)
+	// M-6: never decode unbounded bodies — cap at the configured limit even
+	// when the MaxBody middleware is not in the chain.
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes()+1))
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
@@ -75,13 +79,101 @@ func Readyz(check func() error) http.HandlerFunc {
 	}
 }
 
-// CORS allows browser PWAs to call the services in dev.
-func CORS(next http.Handler) http.Handler {
+// DefaultMaxBodyBytes is the default request-body cap (2 MiB); override
+// with HTTPX_MAX_BODY_BYTES (audit M-6: unbounded body reads = memory-DoS).
+const DefaultMaxBodyBytes = 2 << 20
+
+func maxBodyBytes() int64 {
+	if v := os.Getenv("HTTPX_MAX_BODY_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxBodyBytes
+}
+
+// MaxBody caps request bodies (Content-Length and streamed reads) at
+// HTTPX_MAX_BODY_BYTES (default 2 MiB) and answers 413 RFC7807 when the
+// declared length exceeds the cap; oversized streamed bodies error out of
+// DecodeJSON with a 400/413 from the handler. Apply it outermost, before
+// auth, so unauthenticated junk can't consume memory either.
+func MaxBody(next http.Handler) http.Handler {
+	limit := maxBodyBytes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Dev-Role,X-Dev-Agent-Id,Idempotency-Key")
+		if r.ContentLength > limit {
+			WriteProblem(w, http.StatusRequestEntityTooLarge, "body_too_large",
+				"request body exceeds the configured limit")
+			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allowedOrigins parses CORS_ALLOWED_ORIGINS (comma-separated).
+// Audit M-7: wildcard `*` together with credentialed headers
+// (Authorization) is forbidden. Semantics:
+//   - unset: dev default — reflect the request Origin (dev PWAs on random
+//     localhost ports); in PROFILE=prod this fails closed (deny all).
+//   - set: exact-match allowlist; "*" is honoured only outside prod.
+func allowedOrigins() []string {
+	v := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, o := range strings.Split(v, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func prodProfile() bool {
+	p := os.Getenv("PROFILE")
+	return p == "prod" || p == "production"
+}
+
+// CORS applies the §1.3 CORS policy (audit M-7): origins come from
+// CORS_ALLOWED_ORIGINS; no wildcard with Authorization in prod; prod with
+// no configured origins denies cross-origin browser calls entirely.
+func CORS(next http.Handler) http.Handler {
+	origins := allowedOrigins()
+	if prodProfile() && len(origins) == 0 {
+		log.Printf("profile=prod component=cors CORS_ALLOWED_ORIGINS unset: FAILING CLOSED (no cross-origin browser access)")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		allow := ""
+		switch {
+		case len(origins) > 0:
+			for _, o := range origins {
+				if o == "*" && !prodProfile() {
+					allow = "*"
+					break
+				}
+				if o == origin && origin != "" {
+					allow = origin
+					break
+				}
+			}
+		case !prodProfile() && origin != "":
+			allow = origin // dev convenience: reflect localhost dev origins
+		}
+		if allow != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allow)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Dev-Role,X-Dev-Agent-Id,Idempotency-Key")
+		}
 		if r.Method == http.MethodOptions {
+			if allow == "" && origin != "" {
+				WriteProblem(w, http.StatusForbidden, "cors_denied", "origin not allowed")
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -174,4 +266,55 @@ func RequestIdentity(r *http.Request) string {
 		}
 	}
 	return ""
+}
+
+// CallerIdentity returns the authenticated caller's subject across both
+// auth modes: in keycloak mode the authx middleware propagates the verified
+// subject via the X-Meridian-Caller header; otherwise it falls back to
+// RequestIdentity (dev JWT sub / X-Dev-Agent-Id).
+func CallerIdentity(r *http.Request) string {
+	if sub := r.Header.Get("X-Meridian-Caller"); sub != "" {
+		return sub
+	}
+	return RequestIdentity(r)
+}
+
+// RequestRoles returns the authenticated caller's roles across both auth
+// modes (audit H-5: object-level authz needs role visibility inside
+// handlers). In keycloak mode the authx middleware propagates the verified
+// roles via the X-Meridian-Roles header (comma-joined); in dev mode the
+// X-Dev-Role header and the HS256 Bearer `roles` claim are honoured.
+func RequestRoles(r *http.Request) []string {
+	if h := r.Header.Get("X-Meridian-Roles"); h != "" {
+		return strings.Split(h, ",")
+	}
+	if os.Getenv("AUTH_MODE") == "keycloak" {
+		return nil
+	}
+	var roles []string
+	if dr := r.Header.Get("X-Dev-Role"); dr != "" {
+		roles = append(roles, dr)
+	}
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if claims, ok := validateHS256(strings.TrimPrefix(auth, "Bearer ")); ok {
+			if arr, ok := claims["roles"].([]any); ok {
+				for _, v := range arr {
+					if s, ok := v.(string); ok {
+						roles = append(roles, s)
+					}
+				}
+			}
+		}
+	}
+	return roles
+}
+
+// HasRole reports whether the caller holds the given role.
+func HasRole(r *http.Request, role string) bool {
+	for _, got := range RequestRoles(r) {
+		if got == role {
+			return true
+		}
+	}
+	return false
 }
