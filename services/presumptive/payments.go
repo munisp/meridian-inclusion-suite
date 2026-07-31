@@ -196,7 +196,10 @@ func (s *PaymentService) Authorise(paymentID string) (Payment, AuthoriseResponse
 }
 
 // Capture captures an authorised payment: PSSP capture + post pending ledger
-// transfer + certificate issuance.
+// transfer + certificate issuance. SAGA (audit fix #5): after the PSSP
+// capture succeeds the saga persists "captured_awaiting_post"; failures in
+// the ledger/certificate legs run compensating actions (ledger reversal +
+// PSSP refund) instead of leaving the payer charged without a certificate.
 func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error) {
 	p, ok, err := s.get(paymentID)
 	if err != nil || !ok {
@@ -214,18 +217,30 @@ func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error)
 		_ = s.st.Put("payments", p.ID, p)
 		return p, Certificate{}, fmt.Errorf("pssp capture failed: %s", capRes.Detail)
 	}
+	// Saga point of no return: the PSSP has the money. Persist the
+	// intermediate state first so a crash here is recoverable by a recon
+	// worker, then run the ledger + certificate steps; any failure triggers
+	// the compensating actions (ledger reversal + PSSP refund).
+	p.Status = "captured_awaiting_post"
+	p.UpdatedAt = nowRFC3339()
+	if err := s.st.Put("payments", p.ID, p); err != nil {
+		_ = s.compensateCapture(&p, "persist captured_awaiting_post: "+err.Error())
+		return p, Certificate{}, fmt.Errorf("persist capture state: %w", err)
+	}
 	postID, err := s.lc.PostPending(p.PendingTransferID, p.AmountKobo)
 	if err != nil {
-		return p, Certificate{}, fmt.Errorf("post pending transfer: %w", err)
+		comp := s.compensateCapture(&p, "post pending transfer: "+err.Error())
+		return p, Certificate{}, fmt.Errorf("post pending transfer: %w (compensation: %s)", err, comp)
 	}
 	p.PostTransferID = postID
-	p.Status = "captured"
-	p.UpdatedAt = nowRFC3339()
 	cert, err := s.certs.Issue(p)
 	if err != nil {
-		return p, Certificate{}, err
+		comp := s.compensateCapture(&p, "issue certificate: "+err.Error())
+		return p, Certificate{}, fmt.Errorf("issue certificate: %w (compensation: %s)", err, comp)
 	}
 	p.CertificateSerial = cert.Serial
+	p.Status = "captured"
+	p.UpdatedAt = nowRFC3339()
 	if err := s.st.Put("payments", p.ID, p); err != nil {
 		return p, cert, err
 	}
@@ -234,6 +249,74 @@ func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error)
 		"certificate_serial": cert.Serial, "pssp_ref": p.PSSPRef,
 	}))
 	return p, cert, nil
+}
+
+// Compensation is the durable record of a saga compensation so operations
+// and the recon worker can audit/repair post-capture failures.
+type Compensation struct {
+	ID             string `json:"id"`
+	PaymentID      string `json:"payment_id"`
+	Cause          string `json:"cause"`
+	LedgerReversal string `json:"ledger_reversal,omitempty"` // reversal transfer id
+	PSSPRefund     string `json:"pssp_refund"`               // ok|failed:<err>|skipped
+	CreatedAt      string `json:"created_at"`
+}
+
+// compensateCapture runs the saga compensating actions when a downstream
+// step fails AFTER the PSSP capture succeeded: (1) reverse any posted ledger
+// transfer back to the payer, (2) refund (fallback: void) the PSSP capture,
+// (3) persist a Compensation record and mark the payment "compensated".
+// Returns a human-readable summary of the compensation outcome.
+func (s *PaymentService) compensateCapture(p *Payment, cause string) string {
+	comp := Compensation{
+		ID:        ids.WithPrefix("cmp"),
+		PaymentID: p.ID,
+		Cause:     cause,
+		CreatedAt: nowRFC3339(),
+	}
+	// 1) ledger reversal (only if the pending transfer was posted)
+	if p.PostTransferID != "" {
+		if payer, err := s.payerAccountID(p.TINHash); err == nil {
+			if collections, err := s.collectionsAccountID(); err == nil {
+				revID, err := s.lc.Transfer(ledger.Transfer{
+					DebitAccountID:  collections,
+					CreditAccountID: payer,
+					Ledger:          ledger.LedgerPSMPayments,
+					Code:            ledger.CodeVoid,
+					Amount:          p.AmountKobo,
+					UserData:        "psm-compensation:" + p.ID,
+				})
+				if err == nil {
+					comp.LedgerReversal = revID
+				}
+			}
+		}
+	}
+	// 2) PSSP refund (fallback: void)
+	if adapter, err := s.hub.Adapter(p.Provider); err == nil && p.PSSPRef != "" {
+		if err := adapter.Refund(p.PSSPRef, p.AmountKobo); err != nil {
+			if verr := adapter.Void(p.PSSPRef); verr != nil {
+				comp.PSSPRefund = "failed: " + err.Error()
+			} else {
+				comp.PSSPRefund = "ok (void fallback)"
+			}
+		} else {
+			comp.PSSPRefund = "ok"
+		}
+	} else {
+		comp.PSSPRefund = "skipped: no pssp reference"
+	}
+	// 3) durable record + status
+	_ = s.st.Put("compensations", comp.ID, comp)
+	p.Status = "compensated"
+	p.FailReason = "capture saga compensated: " + cause
+	p.UpdatedAt = nowRFC3339()
+	_ = s.st.Put("payments", p.ID, *p)
+	s.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{
+		"payment_id": p.ID, "status": "compensated", "amount_kobo": p.AmountKobo, "tin_hash": p.TINHash,
+		"compensation_id": comp.ID, "cause": cause, "pssp_refund": comp.PSSPRefund,
+	}))
+	return fmt.Sprintf("compensation %s (ledger_reversal=%s pssp_refund=%s)", comp.ID, comp.LedgerReversal, comp.PSSPRefund)
 }
 
 // Void voids a payment before capture (PSSP void + ledger void, code 3).
