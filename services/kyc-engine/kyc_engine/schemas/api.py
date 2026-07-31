@@ -11,6 +11,7 @@ class CreateCaseRequest(BaseModel):
     subject_type: Literal["individual", "business"]
     channel: str = "api"
     subject_ref: Optional[str] = None
+    declared_value: Optional[float] = None  # feeds the HIGH_VALUE EDD trigger
 
 
 class CreateCaseResponse(BaseModel):

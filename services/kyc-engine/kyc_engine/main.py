@@ -58,7 +58,8 @@ def create_case(req: CreateCaseRequest):
     sess = get_session()
     try:
         case = KycCase(subject_type=req.subject_type, channel=req.channel,
-                       subject_ref=req.subject_ref, status="created")
+                       subject_ref=req.subject_ref, declared_value=req.declared_value,
+                       status="created")
         sess.add(case)
         sess.commit()
         sess.refresh(case)

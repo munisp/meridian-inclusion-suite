@@ -33,6 +33,9 @@ class KycCase(Base):
     # created|documents_received|processing|liveness_pending|step_up|
     # approved|rejected|failed
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # optional declared transaction/relationship value feeding the HIGH_VALUE
+    # EDD trigger (edd_high_value_threshold); None = not declared
+    declared_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
     reason_codes: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
