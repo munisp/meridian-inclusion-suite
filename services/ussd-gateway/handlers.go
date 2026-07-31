@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 // busAdapter adapts the platform inproc bus to the action eventPublisher.
@@ -27,6 +29,28 @@ type server struct {
 	bus      events.Bus
 	notifier *AggregatorNotifier // nil in dev (USSD_AGGREGATOR_URL unset)
 	mu       sync.Mutex          // serialize per-session processing in dev
+	// guard is the webhook replay guard (M-1): X-Aggregator-Timestamp
+	// within ±5 min + X-Aggregator-Nonce replay cache. Nil-safe: when nil
+	// the check is skipped (unit tests constructing bare servers).
+	guard *webhookguard.Guard
+}
+
+// checkReplay applies the webhook replay guard when configured: replays
+// dedup to 409; stale/malformed/missing (prod) timestamps reject 401.
+func (s *server) checkReplay(w http.ResponseWriter, r *http.Request) bool {
+	if s.guard == nil {
+		return true
+	}
+	err := s.guard.Check(r)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, webhookguard.ErrReplay) {
+		httpx.WriteProblem(w, http.StatusConflict, "replay", "duplicate webhook delivery (nonce already seen)")
+		return false
+	}
+	httpx.WriteProblem(w, http.StatusUnauthorized, "unauthorized", err.Error())
+	return false
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -152,6 +176,10 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if !VerifyAggregatorSignature(r.Header.Get("X-Aggregator-Signature"), raw) {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "unauthorized", "invalid aggregator signature")
+		return
+	}
+	// M-1: timestamp tolerance + replay protection on top of the HMAC.
+	if !s.checkReplay(w, r) {
 		return
 	}
 	form, err := url.ParseQuery(string(raw))
