@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     tin_graph_url: str = ""        # empty -> KYB CAC provision disabled (fail-closed)
     cac_registry_url: str = ""     # empty -> [SIM] deterministic fixtures
     nin_verify_url: str = ""       # empty -> [SIM] NIMC adapter
+    vnin_ttl_hours: int = 72       # NIMC vNIN token TTL
 
 
 def get_settings() -> Settings:
