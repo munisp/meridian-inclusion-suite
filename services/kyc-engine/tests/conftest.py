@@ -9,6 +9,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _stub_ocr_backend():
+    """Deterministic OCR for the whole suite: force the sidecar StubBackend
+    so tests never need PaddleOCR model downloads, network, or GPU — even
+    when paddleocr is importable in the environment."""
+    from kyc_engine.pipeline import stage_ocr
+    stage_ocr.set_backend(stage_ocr.StubBackend())
+    yield
+    stage_ocr.set_backend(None)
+
+
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """Isolated SQLite DB + FS storage per test."""
