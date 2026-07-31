@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
@@ -68,6 +69,13 @@ func (f *flakyVerifier) VerifyNIN(nin string) (NINVerification, error) {
 		return NINVerification{}, &outageError{"nimc adapter: connection refused"}
 	}
 	return NIMCSimulator{}.VerifyNIN(nin)
+}
+
+func (f *flakyVerifier) VerifyVNIN(vnin string, issuedAt time.Time) (NINVerification, error) {
+	if f.fail {
+		return NINVerification{}, &outageError{"nimc adapter: connection refused"}
+	}
+	return NIMCSimulator{}.VerifyVNIN(vnin, issuedAt)
 }
 
 type outageError struct{ msg string }
