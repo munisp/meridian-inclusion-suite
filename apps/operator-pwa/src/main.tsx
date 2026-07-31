@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 import App from './App'
 import { initAuth } from './auth'
+import './i18n'
 import './index.css'
 
 // VITE_AUTH_MODE=keycloak runs the OIDC PKCE flow first (may redirect);
