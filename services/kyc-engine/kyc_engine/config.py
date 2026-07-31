@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     edd_high_value_threshold: float = 0.0    # 0 disables the HIGH_VALUE trigger
     monitoring_rescreen_interval_days: int = 90   # 0 disables periodic re-screening
 
+    # --- record retention (FATF R.11 >= 5y floor; NDPA storage limitation) ---
+    retention_years: int = 5       # records older than this are anonymised, not deleted
+
     @property
     def edd_non_f2f_channel_set(self) -> set[str]:
         return {c.strip() for c in self.edd_non_f2f_channels.split(",") if c.strip()}

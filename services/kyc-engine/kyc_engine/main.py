@@ -184,6 +184,17 @@ def review(case_id: str, req: ReviewRequest):
         raise
 
 
+# ------------------------------------------------------------------ retention
+
+@app.post("/v1/retention/purge",
+          dependencies=[Depends(require_role(ROLE_ADMIN))])
+def retention_purge():
+    """Anonymise records past the FATF R.11 retention window (never delete;
+    hash chain preserved). Admin-only; call from cron/scheduler."""
+    from .retention import purge_expired
+    return purge_expired()
+
+
 # ------------------------------------------------------------------ evidence
 
 @app.get("/v1/cases/{case_id}/evidence", response_model=EvidenceChainOut,
