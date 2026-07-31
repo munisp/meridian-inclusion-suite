@@ -1,0 +1,12 @@
+# Minimal deps to run the test suite (no heavy inference stack).
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+pydantic-settings>=2.2
+SQLAlchemy>=2.0
+httpx>=0.27
+numpy>=1.26
+pillow>=10.0
+python-multipart>=0.0.9
+cryptography>=42.0
+pytest>=8.0

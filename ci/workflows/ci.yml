@@ -56,3 +56,18 @@ jobs:
         run: npm install
       - name: typecheck + build
         run: npm run build
+
+  kyc-engine:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/kyc-engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: deps (light — heavy inference stack is image-only)
+        run: pip install -r requirements-test.txt
+      - name: pytest
+        run: python -m pytest tests/ -q
