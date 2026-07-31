@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Operator", "subtitle": "Ìsanwó fúnra rẹ — owó orí àtìmọ́lé & ìjẹ́rìí" },
+  "nav": { "profile": "Profaili", "band": "Ipele mi", "pay": "Sanwó & Ìjẹ́rìí", "education": "Kẹ́kọ̀ọ́" },
+  "sync": { "online": "Lórí ayélujára", "offlineQueued": "Kò sí íntánẹ́ètì — {{count}} dúró", "syncing": "Ń rú sílẹ̀…" },
+  "lang": { "label": "Èdè", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}
