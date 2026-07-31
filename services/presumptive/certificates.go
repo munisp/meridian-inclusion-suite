@@ -5,21 +5,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
 
 // certHMACKey signs certificate payloads (SPEC §4 T12: HMAC-signed payload).
+// Resolved via keyx: fails closed with no dev default in profile=prod.
 func certHMACKey() string {
-	if k := os.Getenv("CERT_HMAC_KEY"); k != "" {
-		return k
-	}
-	return "meridian-dev-cert-key"
+	return keyx.MustKey("CERT_HMAC_KEY", "meridian-dev-cert-key")
 }
 
 // certSerial issues human-verifiable serials: PSM-YYYY-XXXXXXXXXX.
