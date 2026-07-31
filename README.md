@@ -23,7 +23,8 @@ inclusion-suite/
 │   ├── onboarding/    (Go, :8101)    T5
 │   ├── presumptive/   (Go, :8102)    T12
 │   ├── education/     (FastAPI,:8103) T14
-│   └── ussd-gateway/  (Go, :8104)
+│   ├── ussd-gateway/  (Go, :8104)
+│   └── kyc-engine/    (FastAPI,:8105) SPEC A — KYC/KYB doc verification
 ├── apps/
 │   ├── agent-pwa/     (React 18 + TS + Vite + Tailwind PWA, :5201)
 │   └── operator-pwa/  (React 18 + TS + Vite + Tailwind PWA, :5202)
