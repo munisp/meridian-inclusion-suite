@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Operator", "subtitle": "Ịkwụ ụtụ n'onwe gị — ụtụ obere & asambodo" },
+  "nav": { "profile": "Profaịlụ", "band": "Otu m", "pay": "Kwụọ & Asambodo", "education": "Mụta" },
+  "sync": { "online": "N'ịntanetị", "offlineQueued": "Ịntanetị adịghị — {{count}} na-echere", "syncing": "Na-eziga…" },
+  "lang": { "label": "Asụsụ", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}

@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Field Agent", "subtitle": "Ìforúkọsílẹ̀ NRS — gbígbà sílẹ̀ láìsí íntánẹ́ètì" },
+  "nav": { "capture": "Gba", "outbox": "Àpótí ìráńṣẹ́", "commissions": "Kómíṣọ̀nù", "receipts": "Ìrìsì" },
+  "sync": { "online": "Lórí ayélujára", "offlineQueued": "Kò sí íntánẹ́ètì — {{count}} dúró", "syncing": "Ń rú sílẹ̀…" },
+  "lang": { "label": "Èdè", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}

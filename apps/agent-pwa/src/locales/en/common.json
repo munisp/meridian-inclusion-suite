@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Field Agent", "subtitle": "NRS onboarding — offline-first capture" },
+  "nav": { "capture": "Capture", "outbox": "Outbox", "commissions": "Commissions", "receipts": "Receipts" },
+  "sync": { "online": "Online", "offlineQueued": "Offline — {{count}} queued", "syncing": "Syncing…" },
+  "lang": { "label": "Language", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}

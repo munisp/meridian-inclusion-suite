@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Field Agent", "subtitle": "Ndebanye aha NRS — inakọta ozi na-enweghị ịntanetị" },
+  "nav": { "capture": "Nakọta", "outbox": "Igbe ozi", "commissions": "Kọmishọn", "receipts": "Nnata" },
+  "sync": { "online": "N'ịntanetị", "offlineQueued": "Ịntanetị adịghị — {{count}} na-echere", "syncing": "Na-eziga…" },
+  "lang": { "label": "Asụsụ", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
+import { CloudOff } from 'lucide-react'
 import { queuedItems, markSynced, markFailed } from '../db'
 import { syncBatch } from '../api'
+import Chip from '../components/Chip'
+import Empty from '../components/Empty'
 
 interface Row {
   id?: number
@@ -73,8 +76,8 @@ export default function Outbox() {
     <div className="space-y-4">
       <div className="card flex items-center justify-between">
         <div>
-          <h2 className="font-bold text-sand-800">Outbox</h2>
-          <p className="text-xs text-stone-500">{online ? 'Online' : 'Offline — records will queue'} · {queued.length} queued · {synced.length} synced</p>
+          <h2 className="font-bold text-neutral-800">Outbox</h2>
+          <p className="text-xs text-stone-600" aria-live="polite">{online ? 'Online' : 'Offline — records will queue'} · {queued.length} queued · {synced.length} synced</p>
         </div>
         <button className="btn-primary" disabled={busy || !queued.length} onClick={doSync}>
           {busy ? 'Syncing…' : 'Sync now'}
@@ -82,17 +85,29 @@ export default function Outbox() {
       </div>
       {queued.map((r) => (
         <div key={r.id} className="card">
-          <p className="font-medium">{r.item.full_name}</p>
-          <p className="text-xs text-stone-500">
+          <div className="flex items-center justify-between gap-2">
+            <p className="font-medium">{r.item.full_name}</p>
+            <Chip status={r.error ? 'failed' : 'queued'}>{r.error ? 'failed' : 'queued'}</Chip>
+          </div>
+          <p className="text-xs text-stone-600 mt-0.5">
             NIN {r.item.nin.slice(0, 3)}***** · captured {new Date(r.item.captured_at).toLocaleString()}
           </p>
-          {r.error && <p className="text-xs text-red-700">{r.error}</p>}
+          {r.error && (
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <p role="alert" className="text-xs text-danger-strong">{r.error}</p>
+              <button className="btn-ghost text-xs px-3 py-2" disabled={busy || !online} onClick={doSync}>
+                Retry now
+              </button>
+            </div>
+          )}
         </div>
       ))}
-      {!queued.length && <p className="text-sm text-stone-500 text-center py-6">Outbox empty — everything synced.</p>}
+      {!queued.length && (
+        <Empty icon={CloudOff} title="Outbox empty" body="Everything synced. New captures queue here when you're offline." />
+      )}
       {!!log.length && (
         <div className="card">
-          <h3 className="text-sm font-semibold text-sand-800 mb-2">Sync log</h3>
+          <h3 className="text-sm font-semibold text-neutral-800 mb-2">Sync log</h3>
           <ul className="text-xs text-stone-600 space-y-1">{log.map((l, i) => <li key={i}>{l}</li>)}</ul>
         </div>
       )}

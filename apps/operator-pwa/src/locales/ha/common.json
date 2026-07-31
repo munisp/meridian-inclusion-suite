@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Operator", "subtitle": "Kai ake biyan haraji — harajin karami & takardar shaida" },
+  "nav": { "profile": "Bayanai", "band": "Matsayina", "pay": "Biya & Takarda", "education": "Koyo" },
+  "sync": { "online": "A layi", "offlineQueued": "Babu intanet — {{count}} a jira", "syncing": "Ana aikawa…" },
+  "lang": { "label": "Harshe", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}

@@ -3,25 +3,50 @@
 @tailwind utilities;
 
 body {
-  @apply bg-sand-50 text-stone-800 antialiased;
+  @apply bg-neutral-50 text-stone-800 antialiased;
 }
 
 .card {
-  @apply bg-white rounded-xl border border-sand-200 shadow-sm p-4;
+  @apply bg-white rounded-xl border border-neutral-200 shadow-sm p-4;
 }
 
+/* Primary action: brand-700 bg / white text = 5.0:1 (pre-verified).
+   Every button gets a focus-visible ring — no exceptions. */
 .btn-primary {
-  @apply bg-sand-600 hover:bg-sand-700 text-white font-semibold rounded-lg px-4 py-3 transition disabled:opacity-50;
+  @apply bg-brand-700 hover:bg-brand-800 text-white font-semibold rounded-lg px-4 py-3 transition
+    disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-brand-700 focus-visible:outline-none;
 }
 
 .btn-ghost {
-  @apply border border-sand-300 text-sand-700 font-medium rounded-lg px-4 py-3 hover:bg-sand-100 transition;
+  @apply border border-neutral-300 text-neutral-700 font-medium rounded-lg px-4 py-3 hover:bg-neutral-100 transition
+    focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-brand-700 focus-visible:outline-none;
 }
 
 .input {
-  @apply w-full rounded-lg border border-sand-300 bg-white px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sand-400;
+  @apply w-full rounded-lg border border-neutral-300 bg-white px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-brand-400;
+}
+.input[aria-invalid='true'] {
+  @apply border-danger-strong;
 }
 
 .label {
   @apply block text-sm font-medium text-stone-600 mb-1;
+}
+
+/* Status chips (Meridian One §5) — status is always a chip, never coloured
+   text alone. Use the Chip component; these bases back it. */
+.chip {
+  @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
+.chip-success {
+  @apply chip bg-success text-success-on;
+}
+.chip-warning {
+  @apply chip bg-warning text-warning-on;
+}
+.chip-danger {
+  @apply chip bg-danger text-danger-on;
+}
+.chip-info {
+  @apply chip bg-info text-info-on;
 }

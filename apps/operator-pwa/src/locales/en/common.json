@@ -1,0 +1,6 @@
+{
+  "app": { "title": "Meridian Operator", "subtitle": "Self-service — presumptive levy & certificates" },
+  "nav": { "profile": "Profile", "band": "My Band", "pay": "Pay & Certificate", "education": "Learn" },
+  "sync": { "online": "Online", "offlineQueued": "Offline — {{count}} queued", "syncing": "Syncing…" },
+  "lang": { "label": "Language", "en": "English", "ha": "Hausa", "yo": "Yorùbá", "ig": "Igbo" }
+}
