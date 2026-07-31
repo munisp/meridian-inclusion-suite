@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 
-from .auth import ROLE_ADMIN, ROLE_AGENT, ROLE_REVIEWER, require_role
+from .auth import (ROLE_ADMIN, ROLE_AGENT, ROLE_REVIEWER, Principal,
+                   current_principal, require_case_access, require_role)
 from .adapters import audit
 from .adapters.storage import get_storage
 from .config import get_settings
@@ -54,11 +55,13 @@ def metrics():
 
 @app.post("/v1/cases", response_model=CreateCaseResponse, status_code=201,
           dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
-def create_case(req: CreateCaseRequest):
+def create_case(req: CreateCaseRequest,
+                principal: Principal = Depends(current_principal)):
     sess = get_session()
     try:
         case = KycCase(subject_type=req.subject_type, channel=req.channel,
-                       subject_ref=req.subject_ref, status="created")
+                       subject_ref=req.subject_ref, declared_value=req.declared_value,
+                       agent_ref=principal.subject, status="created")
         sess.add(case)
         sess.commit()
         sess.refresh(case)
@@ -75,12 +78,14 @@ def create_case(req: CreateCaseRequest):
 @app.put("/v1/cases/{case_id}/documents", status_code=202,
          dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
 async def upload_document(case_id: str, file: UploadFile = File(...),
-                          doc_type: str = Form("unknown")):
+                          doc_type: str = Form("unknown"),
+                          principal: Principal = Depends(current_principal)):
     sess = get_session()
     try:
         case = sess.get(KycCase, case_id)
         if case is None:
             raise HTTPException(404, "case not found")
+        require_case_access(case, principal)
         data = await file.read()
         # idempotent: same case + same sha256 -> reuse existing document row
         from .adapters.storage import sha256_hex
@@ -104,8 +109,16 @@ async def upload_document(case_id: str, file: UploadFile = File(...),
 
 @app.post("/v1/cases/{case_id}/process", status_code=202,
           dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
-def process_case(case_id: str):
+def process_case(case_id: str, principal: Principal = Depends(current_principal)):
     """Run the pipeline (in-proc; dispatched to Temporal when TEMPORAL_URL set)."""
+    sess = get_session()
+    try:
+        case = sess.get(KycCase, case_id)
+        if case is None:
+            raise HTTPException(404, "case not found")
+        require_case_access(case, principal)
+    finally:
+        sess.close()
     try:
         decision = run_case(case_id)
     except KeyError:
@@ -115,12 +128,13 @@ def process_case(case_id: str):
 
 @app.get("/v1/cases/{case_id}", response_model=CaseOut,
          dependencies=[Depends(require_role(ROLE_AGENT, ROLE_REVIEWER, ROLE_ADMIN))])
-def get_case(case_id: str):
+def get_case(case_id: str, principal: Principal = Depends(current_principal)):
     sess = get_session()
     try:
         case = sess.get(KycCase, case_id)
         if case is None:
             raise HTTPException(404, "case not found")
+        require_case_access(case, principal)
         checks = sess.execute(select(KycCheck).where(KycCheck.case_id == case_id)).scalars().all()
         return CaseOut(
             case_id=case.id, subject_type=case.subject_type, status=case.status,
@@ -137,12 +151,14 @@ def get_case(case_id: str):
 
 @app.post("/v1/cases/{case_id}/liveness/session", response_model=LivenessSessionOut,
           dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
-def create_liveness_session(case_id: str):
+def create_liveness_session(case_id: str,
+                            principal: Principal = Depends(current_principal)):
     sess = get_session()
     try:
         case = sess.get(KycCase, case_id)
         if case is None:
             raise HTTPException(404, "case not found")
+        require_case_access(case, principal)
         sm = ChallengeStateMachine()
         challenges = sm.CHALLENGES[: sm.required]
         ls = LivenessSession(case_id=case_id, challenges=challenges)
@@ -183,11 +199,30 @@ def review(case_id: str, req: ReviewRequest):
         raise
 
 
+# ------------------------------------------------------------------ retention
+
+@app.post("/v1/retention/purge",
+          dependencies=[Depends(require_role(ROLE_ADMIN))])
+def retention_purge():
+    """Anonymise records past the FATF R.11 retention window (never delete;
+    hash chain preserved). Admin-only; call from cron/scheduler."""
+    from .retention import purge_expired
+    return purge_expired()
+
+
 # ------------------------------------------------------------------ evidence
 
 @app.get("/v1/cases/{case_id}/evidence", response_model=EvidenceChainOut,
          dependencies=[Depends(require_role(ROLE_AGENT, ROLE_REVIEWER, ROLE_ADMIN))])
-def evidence(case_id: str):
+def evidence(case_id: str, principal: Principal = Depends(current_principal)):
+    sess = get_session()
+    try:
+        case = sess.get(KycCase, case_id)
+        if case is None:
+            raise HTTPException(404, "case not found")
+        require_case_access(case, principal)
+    finally:
+        sess.close()
     events = audit.chain_for_case(case_id)
     links = [EvidenceLink(seq=i, event_type=e.event_type, hash=e.hash,
                           prev_hash=e.prev_hash, timestamp=e.created_at,

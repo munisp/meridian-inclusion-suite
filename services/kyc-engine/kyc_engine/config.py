@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     stage_timeout_seconds: int = 120
     stage_max_retries: int = 3
 
+    # --- PII at rest ---
+    pii_hmac_key: str = ""         # REQUIRED in prod (fail-closed); dev uses inert key
+
     # --- auth (shared pattern: AUTH_MODE=dev|keycloak) ---
     auth_mode: str = "dev"
     keycloak_issuer: str = ""
@@ -66,14 +69,33 @@ class Settings(BaseSettings):
     liveness_challenge_window_seconds: float = 10.0
     decision_approve: int = 70
     decision_step_up: int = 40
-    ubo_ownership_pct: float = 25.0
+    # UBO/PSC ownership threshold (strict `>`). Default 5%: Nigeria CAMA 2020
+    # PSC register norm; FATF R.10 "more than 25%" deployments set 25.0 via env.
+    ubo_ownership_pct: float = 5.0
     # SPEC §6: refuse auto-approve when any required check is sim
     allow_sim_approve: bool = False
+
+    # --- EDD triggers / ongoing monitoring (FATF R.10(d), R.12) ---
+    edd_non_f2f_channels: str = "api,ussd"   # comma-separated non-face-to-face channels
+    edd_high_value_threshold: float = 0.0    # 0 disables the HIGH_VALUE trigger
+    monitoring_rescreen_interval_days: int = 90   # 0 disables periodic re-screening
+
+    # --- record retention (FATF R.11 >= 5y floor; NDPA storage limitation) ---
+    retention_years: int = 5       # records older than this are anonymised, not deleted
+
+    @property
+    def edd_non_f2f_channel_set(self) -> set[str]:
+        return {c.strip() for c in self.edd_non_f2f_channels.split(",") if c.strip()}
 
     # --- integrations ---
     tin_graph_url: str = ""        # empty -> KYB CAC provision disabled (fail-closed)
     cac_registry_url: str = ""     # empty -> [SIM] deterministic fixtures
+    # --- sanctions/PEP screening ---
+    screening_provider_url: str = ""   # empty -> [SIM] bundled sample list
+    screening_list_path: str = ""      # override path for the offline sample list
+    screening_match_threshold: float = 0.85   # fuzzy name-match cutoff
     nin_verify_url: str = ""       # empty -> [SIM] NIMC adapter
+    vnin_ttl_hours: int = 72       # NIMC vNIN token TTL
 
 
 def get_settings() -> Settings:

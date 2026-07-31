@@ -29,10 +29,15 @@ class KycCase(Base):
     subject_type: Mapped[str] = mapped_column(String(16))  # individual|business
     channel: Mapped[str] = mapped_column(String(32), default="api")
     subject_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # owning agent (token sub / X-Dev-Subject) — object-level authz anchor
+    agent_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="created")
     # created|documents_received|processing|liveness_pending|step_up|
     # approved|rejected|failed
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # optional declared transaction/relationship value feeding the HIGH_VALUE
+    # EDD trigger (edd_high_value_threshold); None = not declared
+    declared_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
     reason_codes: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -60,7 +65,12 @@ class KycExtraction(Base):
     __tablename__ = "kyc_extraction"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     document_id: Mapped[str] = mapped_column(ForeignKey("kyc_document.id"), index=True)
+    # fields holds HMAC-pseudonymised + masked values only (see adapters/pii).
     fields: Mapped[dict] = mapped_column(JSON, default=dict)
+    # RESTRICTED (tokenisation vault): raw PII for reversible lookup by
+    # legitimate processing only (e.g. periodic re-screening). Never
+    # serialised by the API, never logged.
+    pii_vault: Mapped[dict] = mapped_column(JSON, default=dict)
     ocr_conf_avg: Mapped[float] = mapped_column(Float, default=0.0)
     extractor_version: Mapped[str] = mapped_column(String(32), default="1.0.0")
 

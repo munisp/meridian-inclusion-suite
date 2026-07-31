@@ -2,8 +2,9 @@
 
 The CAC text parsing + UBO extraction are REAL (operate on parsed fields);
 the registry cross-check adapter is [SIM]-tagged unless cac_registry_url is
-set (SPEC A §5: rc checksum fail or registry mismatch -> step_up; UBO >25%
-ownership extracted to ubo[]).
+set (SPEC A §5: rc format fail or registry mismatch -> step_up; UBO above the
+configured ownership threshold extracted to ubo[] — default 5%, the CAMA 2020
+PSC register norm; strict `>` semantics).
 """
 from __future__ import annotations
 
@@ -21,8 +22,8 @@ def run_kyb(fields: dict[str, Any]) -> dict[str, Any]:
     if not rc:
         out["issues"].append("rc_number_missing")
         return out
-    if not fields.get("rc_checksum_ok"):
-        out["issues"].append("rc_checksum_fail")
+    if not fields.get("rc_format_ok"):
+        out["issues"].append("rc_format_fail")
     reg = get_registry().lookup(rc)
     out["registry"] = reg
     out["sim"] = bool(getattr(get_registry(), "sim", True))

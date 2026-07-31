@@ -22,12 +22,16 @@ WEIGHTS = {
     "kyb": 10,
 }
 
-HARD_FAIL_REASONS = {"FORENSICS_TAMPER", "FACE_MISMATCH", "SPOOF"}
+HARD_FAIL_REASONS = {"FORENSICS_TAMPER", "FACE_MISMATCH", "SPOOF", "SANCTIONS_HIT"}
 
 
 def decide(checks: list[dict[str, Any]], subject_type: str,
-           unknown_doctype: bool = False) -> dict[str, Any]:
-    """checks: [{kind, score, passed, sim, degraded, hard_fail, reason}]."""
+           unknown_doctype: bool = False,
+           risk_flags: list[str] | None = None) -> dict[str, Any]:
+    """checks: [{kind, score, passed, sim, degraded, hard_fail, reason}].
+    risk_flags: EDD triggers (PEP_MATCH, HIGH_VALUE, SCREENING_HIT,
+    NON_FACE_TO_FACE) — any flag caps an otherwise-approve at
+    enhanced_review (FATF R.10/R.12); never silently approves."""
     s = get_settings()
     reasons: list[str] = []
     hard = [c for c in checks if c.get("hard_fail")]
@@ -63,6 +67,9 @@ def decide(checks: list[dict[str, Any]], subject_type: str,
             and any(c.get("sim") for c in checks)):
         verdict = "step_up"
         reasons.append("SIM_NO_AUTO_APPROVE")
+    if risk_flags and verdict == "approve":
+        verdict = "enhanced_review"
+        reasons.extend(sorted(set(risk_flags)))
     return {"verdict": verdict, "score": score, "reasons": reasons}
 
 

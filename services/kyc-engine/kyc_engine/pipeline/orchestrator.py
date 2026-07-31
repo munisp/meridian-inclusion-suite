@@ -14,14 +14,15 @@ from typing import Any, Callable
 
 from sqlalchemy import select
 
-from ..adapters import audit
+from ..adapters import audit, pii
 from ..adapters.storage import get_storage
 from ..adapters.tingraph import TinGraphClient, TinGraphDown
 from ..config import get_settings
 from ..models.db import get_session
 from ..models.tables import (KycCase, KycCheck, KycDecision, KycDocument,
                              KycExtraction)
-from . import stage_decision, stage_fields, stage_forensics, stage_kyb
+from . import (stage_decision, stage_fields, stage_forensics, stage_kyb,
+               stage_screening)
 from .stage_face import match_faces
 from .stage_ocr import run_ocr
 from .stage_parse import parse_document
@@ -163,7 +164,11 @@ def run_case(case_id: str) -> dict[str, Any]:
                 fields = _run_stage("fields", lambda: stage_fields.extract_fields(doc.doc_type, ocr.tokens))
                 unknown_doctype = unknown_doctype or bool(fields.get("_unknown_doctype"))
 
-                ext = KycExtraction(document_id=doc.id, fields=fields,
+                # PII at rest (K5): persist masked + HMAC-pseudonymised
+                # fields; raw values only in the restricted vault column.
+                sanitized, vault = pii.protect_fields(fields)
+                ext = KycExtraction(document_id=doc.id, fields=sanitized,
+                                    pii_vault=vault,
                                     ocr_conf_avg=ocr.conf_avg,
                                     extractor_version=stage_fields.EXTRACTOR_VERSION)
                 sess.add(ext)
@@ -245,19 +250,40 @@ def evaluate_decision(case_id: str, sess=None, unknown_doctype: bool = False) ->
             elif c.kind == "liveness":
                 if c.detail.get("state") == "failed":
                     item.update(hard_fail=True, reason="SPOOF")
+            elif c.kind == "screening":
+                if c.detail.get("sanctions_hit"):
+                    item.update(hard_fail=True, reason="SANCTIONS_HIT")
+                if c.detail.get("pep_hit"):
+                    item["pep_hit"] = True
             assembled.append(item)
-        dec = stage_decision.decide(assembled, case.subject_type, unknown_doctype)
+        dec = stage_decision.decide(assembled, case.subject_type, unknown_doctype,
+                                    risk_flags=_edd_risk_flags(case, assembled))
         return dec
     finally:
         if own:
             sess.close()
 
 
+def _edd_risk_flags(case: KycCase, assembled: list[dict[str, Any]]) -> list[str]:
+    """EDD triggers (FATF R.10/R.12): PEP match, screening hit, high-value
+    threshold, non-face-to-face channel. Any trigger -> enhanced_review."""
+    s = get_settings()
+    flags: list[str] = []
+    if any(c.get("pep_hit") for c in assembled):
+        flags.append("PEP_MATCH")
+    if case.channel and case.channel in s.edd_non_f2f_channel_set:
+        flags.append("NON_FACE_TO_FACE")
+    if s.edd_high_value_threshold > 0 and (case.declared_value or 0.0) >= s.edd_high_value_threshold:
+        flags.append("HIGH_VALUE")
+    return flags
+
+
 def _apply_decision(sess, case: KycCase, decision: dict, actor: str) -> None:
     case.decision = decision["verdict"]
     case.risk_score = 100 - decision["score"]
     case.reason_codes = decision["reasons"]
-    case.status = {"approve": "approved", "reject": "rejected", "step_up": "step_up"}[decision["verdict"]]
+    case.status = {"approve": "approved", "reject": "rejected", "step_up": "step_up",
+                   "enhanced_review": "enhanced_review"}[decision["verdict"]]
     _decision_hashes(sess, case.id, decision["verdict"], decision["score"],
                      decision["reasons"], actor)
     record_decision(decision["verdict"])
@@ -291,8 +317,8 @@ def review_case(case_id: str, action: str, note: str, actor: str = "user") -> di
         case = sess.get(KycCase, case_id)
         if case is None:
             raise KeyError(f"case {case_id} not found")
-        if case.status != "step_up":
-            raise ValueError(f"case {case_id} not in step_up (status={case.status})")
+        if case.status not in ("step_up", "enhanced_review"):
+            raise ValueError(f"case {case_id} not in review (status={case.status})")
         verdict = "approve" if action == "approve" else "reject"
         reasons = ["MANUAL_REVIEW"] + ([f"note:{note}"] if note else [])
         _apply_decision(sess, case, {"verdict": verdict,
