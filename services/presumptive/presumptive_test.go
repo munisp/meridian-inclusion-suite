@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
@@ -235,3 +236,71 @@ func TestMain(m *testing.M) {
 }
 
 var _ = fmt.Sprint // keep fmt import if unused in future edits
+
+// TestDeviceEnrolmentAndReceiptVerify (audit fix #6): a receipt signed by an
+// enrolled device verifies; unenrolled devices and tampered payloads fail
+// closed.
+func TestDeviceEnrolmentAndReceiptVerify(t *testing.T) {
+	st, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := NewDeviceService(st)
+	if _, err := ds.Enroll("agent-1", "dev-1", "device-secret-key-123"); err != nil {
+		t.Fatal(err)
+	}
+	req := ReceiptVerifyRequest{
+		Serial: "RCPT-OFF-1", AgentID: "agent-1", DeviceID: "dev-1",
+		PayerName: "Musa Bello", AmountKobo: 500000, Purpose: "presumptive levy",
+		IssuedAt: "2026-01-01T10:00:00Z",
+	}
+	req.Signature = signReceipt("device-secret-key-123", CanonicalReceiptPayload(req))
+	valid, detail, err := ds.VerifyReceipt(req)
+	if err != nil || !valid {
+		t.Fatalf("enrolled receipt must verify: valid=%v detail=%s err=%v", valid, detail, err)
+	}
+	// tampered amount
+	bad := req
+	bad.AmountKobo = 900000
+	if valid, _, _ := ds.VerifyReceipt(bad); valid {
+		t.Fatal("tampered receipt must not verify")
+	}
+	// unenrolled device fails closed
+	bad = req
+	bad.DeviceID = "dev-unknown"
+	if valid, d, _ := ds.VerifyReceipt(bad); valid || d != "device not enrolled" {
+		t.Fatalf("unenrolled device must fail closed, got valid=%v detail=%s", valid, d)
+	}
+	// wrong key never verifies
+	bad = req
+	bad.Signature = signReceipt("attacker-key-0000000", CanonicalReceiptPayload(req))
+	if valid, _, _ := ds.VerifyReceipt(bad); valid {
+		t.Fatal("forged signature must not verify")
+	}
+}
+
+// TestFloatRiskScoring (I17): risk score responds to utilization, dormancy
+// and low balance.
+func TestFloatRiskScoring(t *testing.T) {
+	now := time.Now().UTC()
+	// healthy agent: low utilization, recent activity, good balance
+	healthy := AssessFloatRisk("a1", ledger.Balance{CreditsPosted: 10000000, DebitsPosted: 1000000},
+		[]FloatMovement{{CreatedAt: now.Add(-time.Hour).Format(time.RFC3339)}}, now)
+	if healthy.Band != "low" || healthy.LowFloatAlert {
+		t.Fatalf("healthy agent misclassified: %+v", healthy)
+	}
+	// risky agent: fully utilized, dormant 45 days, below low-float threshold
+	risky := AssessFloatRisk("a2", ledger.Balance{CreditsPosted: 1000000, DebitsPosted: 990000},
+		[]FloatMovement{{CreatedAt: now.Add(-45 * 24 * time.Hour).Format(time.RFC3339)}}, now)
+	if risky.Band != "critical" || !risky.LowFloatAlert || risky.DormancyDays != 45 {
+		t.Fatalf("risky agent misclassified: %+v", risky)
+	}
+	if risky.Score <= healthy.Score {
+		t.Fatalf("scores must order risk: healthy=%d risky=%d", healthy.Score, risky.Score)
+	}
+	// dormant with no movements at all
+	empty := AssessFloatRisk("a3", ledger.Balance{}, nil, now)
+	if empty.DormancyDays < 365 || !empty.LowFloatAlert {
+		t.Fatalf("never-active agent must flag: %+v", empty)
+	}
+}
