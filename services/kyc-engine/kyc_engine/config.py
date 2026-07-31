@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     stage_timeout_seconds: int = 120
     stage_max_retries: int = 3
 
+    # --- PII at rest ---
+    pii_hmac_key: str = ""         # REQUIRED in prod (fail-closed); dev uses inert key
+
     # --- auth (shared pattern: AUTH_MODE=dev|keycloak) ---
     auth_mode: str = "dev"
     keycloak_issuer: str = ""

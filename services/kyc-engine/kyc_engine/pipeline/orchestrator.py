@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from sqlalchemy import select
 
-from ..adapters import audit
+from ..adapters import audit, pii
 from ..adapters.storage import get_storage
 from ..adapters.tingraph import TinGraphClient, TinGraphDown
 from ..config import get_settings
@@ -163,7 +163,11 @@ def run_case(case_id: str) -> dict[str, Any]:
                 fields = _run_stage("fields", lambda: stage_fields.extract_fields(doc.doc_type, ocr.tokens))
                 unknown_doctype = unknown_doctype or bool(fields.get("_unknown_doctype"))
 
-                ext = KycExtraction(document_id=doc.id, fields=fields,
+                # PII at rest (K5): persist masked + HMAC-pseudonymised
+                # fields; raw values only in the restricted vault column.
+                sanitized, vault = pii.protect_fields(fields)
+                ext = KycExtraction(document_id=doc.id, fields=sanitized,
+                                    pii_vault=vault,
                                     ocr_conf_avg=ocr.conf_avg,
                                     extractor_version=stage_fields.EXTRACTOR_VERSION)
                 sess.add(ext)

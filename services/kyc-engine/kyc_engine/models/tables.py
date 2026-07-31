@@ -60,7 +60,12 @@ class KycExtraction(Base):
     __tablename__ = "kyc_extraction"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     document_id: Mapped[str] = mapped_column(ForeignKey("kyc_document.id"), index=True)
+    # fields holds HMAC-pseudonymised + masked values only (see adapters/pii).
     fields: Mapped[dict] = mapped_column(JSON, default=dict)
+    # RESTRICTED (tokenisation vault): raw PII for reversible lookup by
+    # legitimate processing only (e.g. periodic re-screening). Never
+    # serialised by the API, never logged.
+    pii_vault: Mapped[dict] = mapped_column(JSON, default=dict)
     ocr_conf_avg: Mapped[float] = mapped_column(Float, default=0.0)
     extractor_version: Mapped[str] = mapped_column(String(32), default="1.0.0")
 
