@@ -36,7 +36,7 @@ export default function Commissions() {
           <p className="text-xs text-stone-500">Captured</p>
         </div>
         <div className="card text-center">
-          <p className="text-2xl font-bold text-sand-700">{verified.length}</p>
+          <p className="text-2xl font-bold text-sand-700">{verified}</p>
           <p className="text-xs text-stone-500">Verified</p>
         </div>
         <div className="card text-center">
