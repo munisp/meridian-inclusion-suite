@@ -7,6 +7,7 @@ package ledger
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -61,6 +62,16 @@ func NewTransferID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// DeterministicTransferID derives a stable 128-bit transfer id from a seed
+// (e.g. "psm-intent:pay-abc"). Used for idempotent transfer creation: the
+// same logical operation always yields the same transfer id, so a retry
+// after a crash replays instead of double-posting (TigerBeetle dedup
+// semantics on client-supplied ids).
+func DeterministicTransferID(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:16])
+}
+
 // Account is a ledger account. No PII: UserData holds an opaque metadata key;
 // the mapping lives in the service's store.
 type Account struct {
@@ -107,7 +118,22 @@ var (
 	ErrLedgerMismatch       = errors.New("ledger: accounts on different ledgers")
 	ErrAmountZero           = errors.New("ledger: amount must be > 0")
 	ErrAmountExceedsPending = errors.New("ledger: amount exceeds pending amount")
+	// ErrTransferIDConflict is returned when a client-supplied transfer id
+	// already exists with different transfer parameters (a true conflict,
+	// not a replay).
+	ErrTransferIDConflict = errors.New("ledger: transfer id exists with different parameters")
 )
+
+// sameTransfer reports whether an existing transfer matches a requested
+// creation (idempotent replay check).
+func sameTransfer(existing *Transfer, t Transfer, pending bool) bool {
+	return existing.DebitAccountID == t.DebitAccountID &&
+		existing.CreditAccountID == t.CreditAccountID &&
+		existing.Ledger == t.Ledger &&
+		existing.Code == t.Code &&
+		existing.Amount == t.Amount &&
+		existing.Pending == pending
+}
 
 // Client is the §1.5 LedgerClient interface.
 type Client interface {
@@ -115,7 +141,16 @@ type Client interface {
 	Transfer(t Transfer) (string, error)
 	PendingTransfer(t Transfer) (string, error)
 	PostPending(pendingID string, amount uint64) (string, error)
+	// PostPendingAs posts a pending transfer under a caller-chosen post
+	// transfer id. Idempotent: if the pending transfer was already consumed
+	// and a posted transfer with postID exists, postID is returned without
+	// moving money again. This closes the crash window between the ledger
+	// post and the record update: the post id is known (and persisted)
+	// before the ledger call.
+	PostPendingAs(pendingID, postID string, amount uint64) (string, error)
 	VoidPending(pendingID string) (string, error)
+	// LookupTransfer returns a transfer by id (pending, posted or void).
+	LookupTransfer(id string) (Transfer, error)
 	Balance(accountID string) (Balance, error)
 }
 
@@ -194,6 +229,14 @@ func (c *DevClient) Transfer(t Transfer) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if t.ID != "" {
+		if existing, ok := c.transfers[t.ID]; ok {
+			if sameTransfer(existing, t, false) {
+				return t.ID, nil // idempotent replay
+			}
+			return "", ErrTransferIDConflict
+		}
+	}
 	if err := c.checkFlags(da, db, 0, t.Amount, 0, 0); err != nil {
 		return "", err
 	}
@@ -219,6 +262,14 @@ func (c *DevClient) PendingTransfer(t Transfer) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if t.ID != "" {
+		if existing, ok := c.transfers[t.ID]; ok {
+			if sameTransfer(existing, t, true) {
+				return t.ID, nil // idempotent replay
+			}
+			return "", ErrTransferIDConflict
+		}
+	}
 	// TigerBeetle: pending debits count against the flag invariant.
 	if err := c.checkFlags(da, db, db.DebitsPending+t.Amount, 0, 0, 0); err != nil {
 		return "", err
@@ -239,6 +290,14 @@ func (c *DevClient) PendingTransfer(t Transfer) (string, error) {
 
 // PostPending captures a pending transfer (≤ pending amount supported).
 func (c *DevClient) PostPending(pendingID string, amount uint64) (string, error) {
+	return c.PostPendingAs(pendingID, "", amount)
+}
+
+// PostPendingAs captures a pending transfer under a caller-chosen post id.
+// Idempotent replay: when the pending transfer was already consumed and a
+// posted transfer with postID exists for the same accounts/amount, postID
+// is returned without moving money again.
+func (c *DevClient) PostPendingAs(pendingID, postID string, amount uint64) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	pt, ok := c.transfers[pendingID]
@@ -246,6 +305,16 @@ func (c *DevClient) PostPending(pendingID string, amount uint64) (string, error)
 		return "", ErrTransferNotFound
 	}
 	if !pt.Pending {
+		// Idempotent replay: the pending transfer was already consumed; if
+		// the expected post transfer exists and matches, report success.
+		if postID != "" {
+			if post, ok2 := c.transfers[postID]; ok2 && !post.Pending &&
+				post.DebitAccountID == pt.DebitAccountID &&
+				post.CreditAccountID == pt.CreditAccountID &&
+				(amount == 0 || post.Amount == amount) {
+				return postID, nil
+			}
+		}
 		return "", ErrTransferNotPending
 	}
 	if amount == 0 {
@@ -267,7 +336,10 @@ func (c *DevClient) PostPending(pendingID string, amount uint64) (string, error)
 	db.DebitsPosted += amount
 	cb.CreditsPosted += amount
 	pt.Pending = false
-	id := NewTransferID()
+	id := postID
+	if id == "" {
+		id = NewTransferID()
+	}
 	post := Transfer{
 		ID:              id,
 		DebitAccountID:  pt.DebitAccountID,
@@ -315,6 +387,17 @@ func (c *DevClient) VoidPending(pendingID string) (string, error) {
 	}
 	c.transfers[id] = &void
 	return id, nil
+}
+
+// LookupTransfer returns a transfer by id (pending, posted or void).
+func (c *DevClient) LookupTransfer(id string) (Transfer, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.transfers[id]
+	if !ok {
+		return Transfer{}, ErrTransferNotFound
+	}
+	return *t, nil
 }
 
 func (c *DevClient) Balance(accountID string) (Balance, error) {
