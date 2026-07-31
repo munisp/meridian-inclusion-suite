@@ -24,6 +24,13 @@ func (f failingLedger) PostPending(pendingID string, amount uint64) (string, err
 	return f.Client.PostPending(pendingID, amount)
 }
 
+func (f failingLedger) PostPendingAs(pendingID, postID string, amount uint64) (string, error) {
+	if f.failPost {
+		return "", fmt.Errorf("simulated ledger outage")
+	}
+	return f.Client.PostPendingAs(pendingID, postID, amount)
+}
+
 // TestCaptureSagaCompensation proves the capture saga is atomic: when the
 // ledger leg fails after a successful PSSP capture, the payer is NOT left
 // charged without a certificate — compensating actions refund the PSSP
