@@ -10,12 +10,14 @@ import (
 
 // server bundles the onboarding service dependencies.
 type server struct {
-	registry    *Registry
-	verifier    NINVerifier
-	provisioner TINProvisioner
-	consent     *ConsentService
-	capture     *CaptureService
-	workflows   *Workflows
+	registry     *Registry
+	verifier     NINVerifier
+	provisioner  TINProvisioner
+	consent      *ConsentService
+	capture      *CaptureService
+	workflows    *Workflows
+	associations *AssociationService
+	crdt         *CRDTMergeService
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -37,6 +39,10 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/consents/{id}/revoke", s.revokeConsent)
 
 	mux.HandleFunc("POST /v1/capture/batch", s.captureBatch)
+	mux.HandleFunc("GET /v1/commissions/summary", s.commissionSummary)
+	mux.HandleFunc("POST /v1/associations", s.createAssociation)
+	mux.HandleFunc("POST /v1/associations/{id}/bulk", s.bulkEnrollAssociation)
+	mux.HandleFunc("POST /v1/capture/merge", s.crdtMerge)
 	mux.HandleFunc("GET /v1/capture/batch/{key}", s.getBatch)
 
 	mux.HandleFunc("GET /v1/workflows", s.listWorkflows)

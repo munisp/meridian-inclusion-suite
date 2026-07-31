@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"io"
 	"net/http"
 	"strings"
@@ -17,6 +18,8 @@ type server struct {
 	certs   *CertificateService
 	wf      *PSMWorkflows
 	limiter *RateLimiter
+	devices *DeviceService
+	bus     events.Bus
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -42,12 +45,17 @@ func (s *server) routes() *http.ServeMux {
 	// certificates (public verify, rate-limited)
 	mux.HandleFunc("GET /v1/certificates/verify/{serial}", s.verifyCertificate)
 
+	// device key enrolment + offline receipt verification (audit fix #6)
+	mux.HandleFunc("POST /v1/devices/enroll", s.enrollDevice)
+	mux.HandleFunc("POST /v1/receipts/verify", s.verifyReceipt)
+
 	// agent float
 	mux.HandleFunc("POST /v1/float/accounts", s.openFloat)
 	mux.HandleFunc("POST /v1/float/topup", s.topupFloat)
 	mux.HandleFunc("POST /v1/float/debit", s.debitFloat)
 	mux.HandleFunc("GET /v1/float/{agent}/balance", s.floatBalance)
 	mux.HandleFunc("GET /v1/float/{agent}/movements", s.floatMovements)
+	mux.HandleFunc("GET /v1/float/{agent}/risk", s.floatRisk)
 
 	// gates
 	mux.HandleFunc("GET /v1/gates", s.listGates)

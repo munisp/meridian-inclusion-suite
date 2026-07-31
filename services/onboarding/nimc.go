@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
 )
 
@@ -40,22 +41,16 @@ func hmacSHA256Hex(key, value string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// NINHash pseudonymises a NIN per §1.3 (HMAC-SHA256, NIN_HMAC_KEY).
+// NINHash pseudonymises a NIN per §1.3 (HMAC-SHA256, NIN_HMAC_KEY via keyx;
+// fail-closed in profile=prod).
 func NINHash(nin string) string {
-	key := os.Getenv("NIN_HMAC_KEY")
-	if key == "" {
-		key = "meridian-dev-nin-key"
-	}
-	return hmacSHA256Hex(key, nin)
+	return hmacSHA256Hex(keyx.MustKey("NIN_HMAC_KEY", "meridian-dev-nin-key"), nin)
 }
 
-// TINHash pseudonymises a TIN per §1.3 (HMAC-SHA256, TIN_HMAC_KEY).
+// TINHash pseudonymises a TIN per §1.3 (HMAC-SHA256, TIN_HMAC_KEY via keyx;
+// fail-closed in profile=prod).
 func TINHash(tin string) string {
-	key := os.Getenv("TIN_HMAC_KEY")
-	if key == "" {
-		key = "meridian-dev-tin-key"
-	}
-	return hmacSHA256Hex(key, tin)
+	return hmacSHA256Hex(keyx.MustKey("TIN_HMAC_KEY", "meridian-dev-tin-key"), tin)
 }
 
 var ninPattern = regexp.MustCompile(`^\d{11}$`)

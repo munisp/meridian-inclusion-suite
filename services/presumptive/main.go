@@ -36,6 +36,8 @@ func main() {
 		gates:   gates,
 		certs:   certs,
 		wf:      wf,
+		devices: NewDeviceService(st),
+		bus:     bus,
 		limiter: NewRateLimiter(20, 20.0/60.0), // 20 verify calls/min per client
 	}
 

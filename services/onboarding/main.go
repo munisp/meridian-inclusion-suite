@@ -26,12 +26,14 @@ func main() {
 	wf := NewWorkflows(st, reg, verifier, provisioner, consent, lc, bus)
 
 	srv := &server{
-		registry:    reg,
-		verifier:    verifier,
-		provisioner: provisioner,
-		consent:     consent,
-		capture:     capture,
-		workflows:   wf,
+		registry:     reg,
+		verifier:     verifier,
+		provisioner:  provisioner,
+		consent:      consent,
+		capture:      capture,
+		workflows:    wf,
+		associations: NewAssociationService(st, reg, capture),
+		crdt:         NewCRDTMergeService(),
 	}
 
 	port := os.Getenv("PORT")

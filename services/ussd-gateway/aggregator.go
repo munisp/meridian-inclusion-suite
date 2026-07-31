@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
 )
 
@@ -35,10 +36,16 @@ func signAggregator(key string, body []byte) string {
 
 // VerifyAggregatorSignature validates the inbound webhook
 // X-Aggregator-Signature header: hex HMAC-SHA256(USSD_AGGREGATOR_KEY, raw
-// body). In dev (key unset) every webhook is accepted.
+// body). In dev (key unset) every webhook is accepted. In profile=prod a
+// missing key fails closed (reject-all) rather than silently disabling
+// signature checks on a misdeployed gateway.
 func VerifyAggregatorSignature(signature string, body []byte) bool {
 	key := aggregatorKey()
 	if key == "" {
+		if keyx.Prod() {
+			log.Printf("profile=prod component=ussd-gateway aggregator_key=missing action=reject-all (set USSD_AGGREGATOR_KEY)")
+			return false // fail closed: no key in prod => nothing verifies
+		}
 		return true // dev fallback
 	}
 	if signature == "" {

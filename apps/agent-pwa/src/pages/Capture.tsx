@@ -19,8 +19,12 @@ export default function Capture() {
     if (!/^\d{11}$/.test(form.nin)) return setError('NIN must be exactly 11 digits')
     if (form.full_name.trim().length < 3) return setError('Full name is required')
     if (!consent) return setError('Operator consent (NDPA) must be recorded')
-    const batchId = localStorage.getItem('agent.batchId') || newBatchId()
-    localStorage.setItem('agent.batchId', batchId)
+    // DATA-LOSS FIX: a fresh batch id per capture. The previous code persisted
+    // one batchId in localStorage forever; the server dedups batches on the
+    // Idempotency-Key, so every sync after the first was discarded as a
+    // "duplicate" and its items were lost. Record-level dedup is handled by
+    // the per-item client_ref, so batch ids must never be reused.
+    const batchId = newBatchId()
     const ref = newClientRef()
     await queueCapture(batchId, {
       client_ref: ref,

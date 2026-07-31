@@ -269,3 +269,16 @@ go run ./services/onboarding   # auth=RS256/JWKS, store=postgres, bus=kafka, nim
 `.github/workflows/ci.yml` (Go build/vet/test -race, education pytest, both
 PWA `npm ci` + build). A verbatim copy lives at `ci/workflows/ci.yml` (see
 `ci/README.md`) for tokens without GitHub `workflow` scope.
+
+## Hardening + innovations (branch feature/inclusion-hardening)
+- FIX: offline sync idempotency-key reuse data loss — fresh uuid batch id per capture/sync; server regression test.
+- FIX: PSSP capture saga is now atomic — captured_awaiting_post state + compensating ledger reversal/PSSP refund + durable Compensation record.
+- FIX: keyx KeyProvider (env/file/chain + SIMULATED kms-stub); CERT_HMAC_KEY/NIN/TIN HMAC/PSSP webhook secret fail closed in profile=prod; dev defaults logged, dev-only.
+- FIX: offline receipts server-verifiable — POST /v1/devices/enroll binds device keys to the authenticated agent; POST /v1/receipts/verify fails closed for unenrolled devices.
+- FIX: commissions computed server-side (GET /v1/commissions/summary) keyed to authenticated identity (JWT sub; X-Dev-Agent-Id in AUTH_MODE=dev only); PWA is read-only.
+- FIX: dev auth fail-closed — aggregator HMAC rejects all in profile=prod when USSD_AGGREGATOR_KEY unset; X-Dev-* headers honoured only in AUTH_MODE=dev.
+- FIX: USSD session resume — durable KV store (+Redis when REDIS_URL set) with MSISDN index; redial offers "continue last transaction" (Redis client REAL but UNVERIFIED here — no Redis in test env).
+- I15 (REAL): multilingual EN/HA/YO/IG/Pidgin template packs; dial #en/#ha/#yo/#ig/#pcm to switch; completeness-tested.
+- I16 (REAL): market-association bulk onboarding — POST /v1/associations + /v1/associations/{id}/bulk (CSV) with deterministic client_ref dedup + NIN-hash conflict resolution.
+- I17 (REAL): agent float risk scoring — GET /v1/float/{agent}/risk (utilization/velocity/dormancy → 0-100 score + low-float alert events).
+- I18 (REAL): offline-first CRDT sync — internal/platform/crdtx OR-Set with HLC; POST /v1/capture/merge; duplicate + out-of-order safe (tested).

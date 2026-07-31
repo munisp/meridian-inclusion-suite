@@ -15,7 +15,10 @@ for (const api of [onboardingApi, presumptiveApi]) {
     if (token) {
       cfg.headers['Authorization'] = `Bearer ${token}`
     } else {
+      // AUTH_MODE=dev only: the server honours these dev stand-ins solely
+      // outside profile=prod; prod identity comes from the JWT sub.
       cfg.headers['X-Dev-Role'] = 'operator'
+      cfg.headers['X-Dev-Agent-Id'] = localStorage.getItem('agent.id') || 'agent-demo-1'
     }
     return cfg
   })
@@ -60,3 +63,25 @@ export async function fetchFloatBalance(agentId: string): Promise<any> {
 
 export const naira = (kobo: number) =>
   '₦' + (kobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+// Device enrolment (audit fix #6): registers this device's signing key with
+// the server so offline receipts become server-verifiable.
+export async function enrollDevice(agentId: string, deviceId: string, key: string): Promise<void> {
+  await presumptiveApi.post('/v1/devices/enroll', { agent_id: agentId, device_id: deviceId, key })
+}
+
+export interface CommissionSummary {
+  agent_id: string
+  captured: number
+  verified: number
+  accrued_kobo: number
+  rate_kobo: number
+  rule_pack_version: string
+}
+
+// Server-side commission summary (audit fix #2): computed by the onboarding
+// service from the registry, keyed to the authenticated agent identity.
+export async function fetchCommissionSummary(): Promise<CommissionSummary> {
+  const resp = await onboardingApi.get<CommissionSummary>('/v1/commissions/summary')
+  return resp.data
+}

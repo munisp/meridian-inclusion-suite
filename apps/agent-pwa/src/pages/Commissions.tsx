@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import { fetchOperators, fetchFloatBalance, naira } from '../api'
-
-const COMMISSION_PER_VERIFIED_KOBO = 20000 // ₦200 per NIN/TIN-verified operator
+import { fetchOperators, fetchFloatBalance, fetchCommissionSummary, naira, CommissionSummary } from '../api'
 
 export default function Commissions() {
   const [rows, setRows] = useState<any[]>([])
   const [float, setFloat] = useState<any>(null)
+  const [summary, setSummary] = useState<CommissionSummary | null>(null)
   const [error, setError] = useState<string | null>(null)
   const agentId = localStorage.getItem('agent.id') || 'agent-demo-1'
 
@@ -14,22 +13,26 @@ export default function Commissions() {
       .then(setRows)
       .catch((e) => setError('Onboarding service unreachable: ' + (e?.message || e)))
     fetchFloatBalance(agentId).then(setFloat).catch(() => setFloat(null))
+    // audit fix #2: commissions are computed SERVER-SIDE, keyed to the
+    // authenticated agent identity (JWT sub in prod). The PWA never computes
+    // the amount and never asserts the identity itself.
+    fetchCommissionSummary().then(setSummary).catch(() => setSummary(null))
   }, [agentId])
 
   const mine = rows.filter((r) => r.agent_id === agentId)
-  const verified = mine.filter((r) => ['nin_verified', 'tin_provisioned', 'graduated'].includes(r.status))
-  const accrued = verified.length * COMMISSION_PER_VERIFIED_KOBO
+  const verified = summary ? summary.verified : mine.filter((r) => ['nin_verified', 'tin_provisioned', 'graduated'].includes(r.status)).length
+  const accrued = summary ? summary.accrued_kobo : 0
 
   return (
     <div className="space-y-4">
       <div className="card">
         <h2 className="font-bold text-sand-800">Commission dashboard</h2>
-        <p className="text-xs text-stone-500">Agent: {agentId} (set localStorage agent.id to switch)</p>
+        <p className="text-xs text-stone-500">Agent: {summary?.agent_id || agentId} · amounts computed server-side {summary ? `(rate ${naira(summary.rate_kobo)}, ${summary.rule_pack_version})` : '(offline — awaiting server summary)'}</p>
       </div>
       {error && <div className="card text-sm text-amber-800">{error} — showing offline placeholders.</div>}
       <div className="grid grid-cols-3 gap-3">
         <div className="card text-center">
-          <p className="text-2xl font-bold text-sand-700">{mine.length}</p>
+          <p className="text-2xl font-bold text-sand-700">{summary ? summary.captured : mine.length}</p>
           <p className="text-xs text-stone-500">Captured</p>
         </div>
         <div className="card text-center">

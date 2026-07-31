@@ -80,7 +80,7 @@ func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Dev-Role,Idempotency-Key")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Dev-Role,X-Dev-Agent-Id,Idempotency-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -153,4 +153,25 @@ func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
 			WriteProblem(w, http.StatusUnauthorized, "unauthorized", "provide X-Dev-Role header or Bearer HS256 dev JWT (AUTH_MODE=dev)")
 		})
 	}
+}
+
+// RequestIdentity returns the authenticated caller identity for identity-
+// keyed endpoints (device enrolment, commissions): the JWT `sub` claim from
+// an already-validated Bearer token, or — ONLY in AUTH_MODE=dev — the
+// X-Dev-Agent-Id header (dev stand-in for a per-agent principal). Returns ""
+// when no identity can be established.
+func RequestIdentity(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if claims, ok := validateHS256(strings.TrimPrefix(auth, "Bearer ")); ok {
+			if sub, _ := claims["sub"].(string); sub != "" {
+				return sub
+			}
+		}
+	}
+	if os.Getenv("AUTH_MODE") != "keycloak" {
+		if id := r.Header.Get("X-Dev-Agent-Id"); id != "" {
+			return id // dev-only stand-in; never honoured in prod
+		}
+	}
+	return ""
 }
