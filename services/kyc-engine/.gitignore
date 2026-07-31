@@ -1,0 +1,6 @@
+# Generated fixture PNGs are build artifacts (python tests/make_fixtures.py)
+tests/fixtures/*.png
+__pycache__/
+*.pyc
+.kyc_store/
+kyc_engine.db
