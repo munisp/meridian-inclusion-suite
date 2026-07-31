@@ -47,6 +47,20 @@ func (s *server) processInput(sessionID, phone, input string) string {
 	defer s.mu.Unlock()
 	sess, ok := s.store.Get(sessionID)
 	if !ok {
+		// Resume handling (audit fix #8): a redial from the same MSISDN with a
+		// still-live prior session gets a "continue?" prompt instead of a cold
+		// restart. The special __resume menu is handled below.
+		if idx, isIdx := s.store.(PhoneIndexer); isIdx {
+			if prev, found := idx.GetByPhone(phone); found && prev.ID != sessionID && prev.Menu != "" {
+				resume := &Session{
+					ID: sessionID, Phone: phone, Menu: "__resume",
+					Data:      map[string]string{"__resume_target": prev.ID},
+					CreatedAt: time.Now(),
+				}
+				s.store.Put(resume)
+				return "CON Network interruption? 1. Continue last transaction 2. Start over"
+			}
+		}
 		sess = &Session{ID: sessionID, Phone: phone, Data: map[string]string{}, CreatedAt: time.Now()}
 		s.store.Put(sess)
 		text, cont, err := s.engine.Start(sess)
@@ -62,6 +76,50 @@ func (s *server) processInput(sessionID, phone, input string) string {
 			return prefix(text, cont)
 		}
 	}
+	// Resume prompt dispatch: adopt the prior session's state (re-keyed to the
+	// new sessionId) or discard it and start over.
+	if sess.Menu == "__resume" {
+		targetID := sess.Data["__resume_target"]
+		s.store.Delete(sessionID)
+		if strings.TrimSpace(input) == "1" {
+			prev, found := s.store.Get(targetID)
+			if !found {
+				ns := &Session{ID: sessionID, Phone: phone, Data: map[string]string{}, CreatedAt: time.Now()}
+				s.store.Put(ns)
+				text, cont, err := s.engine.Start(ns)
+				s.store.Put(ns)
+				if err != nil {
+					return "END Service error. Please try again later."
+				}
+				return prefix(text, cont)
+			}
+			prev.ID = sessionID // re-key to the new session id
+			s.store.Delete(targetID)
+			s.store.Put(prev)
+			m := s.graph.Menus[prev.Menu]
+			return "CON Resuming. " + render(m.Text, prev)
+		}
+		s.store.Delete(targetID)
+		ns := &Session{ID: sessionID, Phone: phone, Data: map[string]string{}, CreatedAt: time.Now()}
+		s.store.Put(ns)
+		text, cont, err := s.engine.Start(ns)
+		s.store.Put(ns)
+		if err != nil {
+			return "END Service error. Please try again later."
+		}
+		return prefix(text, cont)
+	}
+
+	// I15: language switching by dial code (#en #ha #yo #ig #pcm) at any menu;
+	// the preference lives in the session (per-taxpayer) and is echoed in
+	// the switched-to language.
+	if lang, ok := langFromDial(input); ok {
+		sess.Data["lang"] = string(lang)
+		s.store.Put(sess)
+		m := s.graph.Menus[sess.Menu]
+		return "CON " + T(string(lang), "lang_switched", "") + " " + render(localizedText(sess, m), sess)
+	}
+
 	text, cont, err := s.engine.Handle(sess, input)
 	if err != nil {
 		s.store.Delete(sessionID)

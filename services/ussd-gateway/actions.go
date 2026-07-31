@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 )
 
 // actions implements the DSL action handlers. Where a backing service URL is
@@ -26,11 +28,10 @@ func hmacHex(key, value string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// keyOr resolves HMAC key material via keyx: env/file providers first, dev
+// fallback only in profile=dev (fail-closed in profile=prod).
 func keyOr(name, fallback string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return fallback
+	return keyx.MustKey(name, fallback)
 }
 
 // deriveTIN mirrors services/onboarding LocalTINProvisioner (NIN=TIN fusion
