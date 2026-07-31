@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
@@ -165,6 +166,7 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 		TradeCategory:   in.TradeCategory,
 		TurnoverBand:    eval.Band,
 		AmountKobo:      amount,
+		Currency:        "NGN",
 		Period:          in.Period,
 		Provider:        in.Provider,
 		Status:          "intent",
@@ -459,12 +461,72 @@ func (s *PaymentService) Void(paymentID string) (Payment, error) {
 	return p, nil
 }
 
-// HandleWebhook applies a PSSP webhook callback (authorised|captured|failed).
-func (s *PaymentService) HandleWebhook(provider string, payload struct {
-	Reference string `json:"reference"`
-	Event     string `json:"event"` // authorisation.successful|charge.successful|charge.failed|authorisation.voided
-	PaymentID string `json:"payment_id"`
-}) (Payment, error) {
+// WebhookPayload is a PSSP webhook callback. AmountKobo/Currency are echoed
+// by real providers (Paystack data.amount, Flutterwave data.amount/currency)
+// and are verified against the stored intent before any value is given (G1).
+type WebhookPayload struct {
+	Reference  string `json:"reference"`
+	Event      string `json:"event"` // authorisation.successful|charge.successful|charge.failed|authorisation.voided|charge.dispute.create|charge.dispute.resolve
+	PaymentID  string `json:"payment_id"`
+	AmountKobo uint64 `json:"amount_kobo,omitempty"`
+	Currency   string `json:"currency,omitempty"`
+	Reason     string `json:"reason,omitempty"`  // dispute reason (charge.dispute.create)
+	Outcome    string `json:"outcome,omitempty"` // won|lost (charge.dispute.resolve)
+}
+
+// ErrWebhookMismatch marks a webhook whose amount/currency disagrees with the
+// stored intent or with the provider's own verify response. Handlers map it
+// to HTTP 409 and NO state change is applied (G1).
+var ErrWebhookMismatch = fmt.Errorf("webhook payload does not match stored intent")
+
+// paymentRank orders the monotonic payment state machine
+// (authorised < captured < settled). Terminal/side states (voided, failed,
+// compensated, disputed, charged_back) are out of the monotonic chain and
+// handled by explicit transitions only (G2).
+func paymentRank(status string) (int, bool) {
+	switch status {
+	case "intent":
+		return 0, true
+	case "pending_authorisation":
+		return 1, true
+	case "authorised":
+		return 2, true
+	case "captured_awaiting_post":
+		return 3, true
+	case "captured":
+		return 4, true
+	case "settled":
+		return 5, true
+	}
+	return -1, false
+}
+
+// ProcessedWebhookEvent is the persisted dedup record for a delivered PSSP
+// webhook. The id is deterministic — provider:reference:event — so a
+// redelivery (Paystack retries for up to ~72h) hits the same record and is
+// acked as an idempotent no-op instead of re-running the transition (G2).
+type ProcessedWebhookEvent struct {
+	ID          string `json:"id"` // provider:reference:event
+	PaymentID   string `json:"payment_id"`
+	Event       string `json:"event"`
+	Outcome     string `json:"outcome"` // applied|parked (parked = out-of-order, acked without state change)
+	ProcessedAt string `json:"processed_at"`
+}
+
+func webhookEventID(provider, reference, event string) string {
+	return provider + ":" + reference + ":" + event
+}
+
+// HandleWebhook applies a PSSP webhook callback. Guarantees (G1/G2):
+//   - amount/currency in the payload AND the provider's own Verify response
+//     are checked against the stored intent before capture/certificate;
+//     a mismatch is rejected (409 + alert event) with no state change;
+//   - deliveries are deduped on (provider, reference, event): a redelivery
+//     of an applied event is a 200 idempotent no-op;
+//   - the state machine is monotonic: an out-of-order event that would
+//     regress state (e.g. authorisation.successful after capture) is parked
+//     and acked without touching the payment.
+func (s *PaymentService) HandleWebhook(provider string, payload WebhookPayload) (Payment, error) {
 	var target Payment
 	found := false
 	if payload.PaymentID != "" {
@@ -489,19 +551,122 @@ func (s *PaymentService) HandleWebhook(provider string, payload struct {
 	if !found {
 		return Payment{}, fmt.Errorf("no payment matches webhook reference %s", payload.Reference)
 	}
+	// Dedup (G2): a previously applied/parked delivery of this exact event is
+	// acked as a no-op — providers must get 200 so they stop retrying.
+	eventID := webhookEventID(provider, payload.Reference, payload.Event)
+	var seen ProcessedWebhookEvent
+	if ok, err := s.st.Get("webhook_events", eventID, &seen); err == nil && ok {
+		return target, nil // idempotent redelivery: 200 no-op
+	}
+	markProcessed := func(outcome string) {
+		_ = s.st.Put("webhook_events", eventID, ProcessedWebhookEvent{
+			ID: eventID, PaymentID: target.ID, Event: payload.Event, Outcome: outcome, ProcessedAt: nowRFC3339(),
+		})
+	}
 	switch payload.Event {
 	case "charge.successful":
+		// Already captured by an earlier delivery/flow: idempotent ack.
+		if r, ok := paymentRank(target.Status); ok && r >= 3 {
+			markProcessed("parked")
+			return target, nil
+		}
+		if err := s.verifyWebhookValue(provider, target, payload); err != nil {
+			return target, err // 409 + alert; no state change
+		}
 		p, _, err := s.Capture(target.ID)
-		return p, err
+		if err != nil {
+			return p, err
+		}
+		markProcessed("applied")
+		return p, nil
 	case "charge.failed", "authorisation.voided":
-		return s.Void(target.ID)
+		p, err := s.Void(target.ID)
+		if err != nil {
+			return p, err
+		}
+		markProcessed("applied")
+		return p, nil
 	case "authorisation.successful":
+		// Monotonic guard (G2): a late/duplicate authorisation must never
+		// downgrade a captured/settled payment back to authorised.
+		if r, ok := paymentRank(target.Status); !ok || r >= 3 {
+			markProcessed("parked")
+			return target, nil // out-of-order: ack, no regression
+		}
+		if target.Status == "authorised" {
+			markProcessed("parked")
+			return target, nil // duplicate: no-op
+		}
 		target.Status = "authorised"
 		target.UpdatedAt = nowRFC3339()
-		return target, s.st.Put("payments", target.ID, target)
+		if err := s.st.Put("payments", target.ID, target); err != nil {
+			return target, err
+		}
+		markProcessed("applied")
+		return target, nil
+	case "charge.dispute.create":
+		d, err := s.OpenDispute(target, payload.Reason)
+		if err != nil {
+			return target, err
+		}
+		markProcessed("applied")
+		_ = d
+		p, _, _ := s.get(target.ID)
+		return p, nil
+	case "charge.dispute.resolve":
+		if err := s.ResolveDispute(target, payload.Outcome); err != nil {
+			return target, err
+		}
+		markProcessed("applied")
+		p, _, _ := s.get(target.ID)
+		return p, nil
 	default:
 		return target, fmt.Errorf("unknown webhook event %q", payload.Event)
 	}
+}
+
+// verifyWebhookValue (G1) defends against forged/underpaid/misconfigured
+// webhooks before value is given: (1) any amount/currency echoed in the
+// payload must equal the stored intent; (2) the provider's own Verify
+// endpoint must confirm the transaction for the stored amount/currency.
+// On any disagreement it publishes an alert and returns ErrWebhookMismatch —
+// the handler answers 409 and the payment is untouched.
+func (s *PaymentService) verifyWebhookValue(provider string, p Payment, payload WebhookPayload) error {
+	mismatch := func(format string, args ...any) error {
+		detail := fmt.Sprintf(format, args...)
+		s.bus.Publish("nrs.payments.alerts.v1", events.New("nrs.payments.alerts.v1", serviceName, "", p.RulePackVersion, map[string]any{
+			"alert": "webhook_value_mismatch", "payment_id": p.ID, "provider": provider,
+			"reference": payload.Reference, "detail": detail,
+		}))
+		return fmt.Errorf("%w: %s", ErrWebhookMismatch, detail)
+	}
+	if payload.AmountKobo != 0 && payload.AmountKobo != p.AmountKobo {
+		return mismatch("payload amount %d kobo != intent amount %d kobo", payload.AmountKobo, p.AmountKobo)
+	}
+	if payload.Currency != "" && !strings.EqualFold(payload.Currency, p.Currency) {
+		return mismatch("payload currency %q != intent currency %q", payload.Currency, p.Currency)
+	}
+	// Re-verify with the provider server-side (Paystack/Flutterwave both
+	// mandate verify-before-fulfil). A verify failure fails closed: the
+	// webhook is rejected (provider will retry) and nothing is captured.
+	adapter, err := s.hub.Adapter(provider)
+	if err != nil {
+		return fmt.Errorf("webhook verify: %w", err)
+	}
+	vr, err := adapter.Verify(payload.Reference)
+	if err != nil {
+		return fmt.Errorf("webhook verify: provider verification unavailable: %w", err)
+	}
+	if vr.Status == "failed" {
+		return mismatch("provider verify: reference %s not successful (%s)", payload.Reference, vr.Detail)
+	}
+	if vr.AmountKobo != 0 && vr.AmountKobo != p.AmountKobo {
+		return mismatch("provider verify amount %d kobo != intent amount %d kobo", vr.AmountKobo, p.AmountKobo)
+	}
+	if vr.Currency != "" && !strings.EqualFold(vr.Currency, p.Currency) {
+		return mismatch("provider verify currency %q != intent currency %q", vr.Currency, p.Currency)
+	}
+	return nil
 }
 
 func (s *PaymentService) get(id string) (Payment, bool, error) {

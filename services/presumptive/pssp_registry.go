@@ -155,7 +155,7 @@ func (r *PSSPRegistry) Onboard(in OnboardRequest) (OnboardResult, error) {
 	}
 	// per-PSSP keyed sim adapter (provider key = name)
 	refFmt := strings.ToUpper(name)[:3] + "-%s"
-	r.hub.adapters[name] = newPSSPSim(name, refFmt, in.FeeBps)
+	r.hub.adapters[name] = newPSSPSim(name, refFmt, feeScheduleFor(name, FeeSchedule{RateBps: in.FeeBps, CapKobo: 200000}))
 	return OnboardResult{PSSPView: rec.view(), WebhookSecret: rec.WebhookSecret}, nil
 }
 

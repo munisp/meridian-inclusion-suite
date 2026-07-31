@@ -1,10 +1,12 @@
 package main
 
 import (
-	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
@@ -169,22 +171,30 @@ func (s *server) psspWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
-	if !s.pssps.VerifyWebhook(r.PathValue("provider"), r.Header.Get("X-PSSP-Signature"), body) {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "bad_signature", "X-PSSP-Signature HMAC validation failed")
+	// G3: the signature scheme is per-PSSP (hmac-sha256 generic, hmac-sha512
+	// Paystack, verif-hash Flutterwave). HMAC schemes use X-PSSP-Signature;
+	// the Flutterwave scheme uses the verif-hash header.
+	provider := r.PathValue("provider")
+	sig := r.Header.Get("X-PSSP-Signature")
+	if sig == "" {
+		sig = r.Header.Get("verif-hash")
+	}
+	if !s.pay.hub.VerifyWebhookSignatureFor(provider, sig, body) {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "bad_signature", "webhook signature validation failed for provider scheme")
 		return
 	}
-	var payload struct {
-		Reference string `json:"reference"`
-		Event     string `json:"event"`
-		PaymentID string `json:"payment_id"`
-	}
+	var payload WebhookPayload
 	if err := jsonUnmarshal(body, &payload); err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	p, err := s.pay.HandleWebhook(r.PathValue("provider"), payload)
+	p, err := s.pay.HandleWebhook(provider, payload)
 	if err != nil {
-		httpx.WriteProblem(w, http.StatusUnprocessableEntity, "webhook_error", err.Error())
+		status := http.StatusUnprocessableEntity
+		if errors.Is(err, ErrWebhookMismatch) {
+			status = http.StatusConflict // amount/currency mismatch: 409, no state change (G1)
+		}
+		httpx.WriteProblem(w, status, "webhook_error", err.Error())
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, p)

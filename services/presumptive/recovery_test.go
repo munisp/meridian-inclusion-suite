@@ -273,3 +273,4 @@ func TestCertificateIssueIdempotent(t *testing.T) {
 		t.Fatalf("certificate issuance must be idempotent, got %+v vs %+v", c1, c2)
 	}
 }
+

@@ -133,7 +133,43 @@ curl -X POST localhost:8103/v1/chat -H 'Content-Type: application/json' -d '{"me
   `POST /v1/payments/{id}/capture` (post pending, code 2) / `{id}/void` (code 3).
 - **PSSP adapters** (Remita / eTranzact / Flutterwave-class interface) with
   deterministic simulators; **webhook callbacks** at
-  `POST /v1/pssp/webhook/{provider}` (HMAC-signed, `PSSP_WEBHOOK_SECRET`).
+  `POST /v1/pssp/webhook/{provider}` (signed, per-PSSP scheme + secret).
+- **Payments parity hardening** (branch `feature/payments-parity`):
+  - **Verify-before-value (G1)**: `charge.successful` webhooks re-verify the
+    transaction with the provider (`adapter.Verify`) and match amount +
+    currency against the stored intent before capture/certificate; mismatch →
+    **409 + alert** (`nrs.payments.alerts.v1`), no state change. Payments are
+    currency-locked to NGN at intent.
+  - **Idempotent, monotonic webhooks (G2)**: every delivery is deduped on a
+    deterministic `provider:reference:event` key (persisted); redeliveries are
+    **200 idempotent no-ops**. The state machine is monotonic
+    (authorised < captured < settled): out-of-order events (e.g. a late
+    `authorisation.successful` after capture) are parked/acked without
+    regressing state.
+  - **Disputes / chargebacks (G11)**: `charge.dispute.create` opens a dispute
+    record (reason, evidence_due_at, **CBN 72h resolution_due_at**), holds the
+    disputed amount on the ledger (pending hold collections → dispute-hold
+    account, code 6) and pages ops on `nrs.payments.dispute.v1`.
+    `charge.dispute.resolve` with `won` releases the hold and restores the
+    payment; with `lost` posts the hold (chargeback debit lands on the
+    dispute-hold account, visible to recon) and marks the payment
+    `charged_back`.
+  - **Per-PSSP signature schemes (G3)**: `hmac-sha256` (generic),
+    `hmac-sha512` (Paystack-compatible), `verif-hash` (Flutterwave-compatible)
+    selectable per registered PSSP (`PSSP_WEBHOOK_SCHEME_<P>`,
+    `PSSP_WEBHOOK_SECRET_<P>`); unknown schemes fail closed.
+  - **Capped fees (G12)**: per-PSSP `{rate_bps, cap_kobo}` schedule
+    (`PSSP_FEE_RATE_BPS_<P>`, `PSSP_FEE_CAP_KOBO_<P>`); documented default is
+    the CBN MSC norm 0.5% capped ₦2,000 for local cards — uncapped linear
+    fees no longer corrupt `FeeKobo`/recon on large levies.
+- **Roadmap — NIP rails (G6/G7, out of scope for now)**: no NIBSS NIP-shaped
+  outbound rail exists yet (name enquiry, session-id tracking, transaction
+  status query, payout adapter), and there is no reversal-vs-refund
+  distinction for failed in-flight transfers with the CBN 24/48/72h clocks.
+  Required before commission payouts/refunds are auto-discharged to bank
+  accounts — wrong-account payouts are unrecoverable. References:
+  [NIBSS NIP FAQ](https://nibss-plc.com.ng/nibss-instant-payment/),
+  [CBN revised timelines for reversals/refunds, June 2020](https://proshare.co/articles/cbn-revises-timelines-for-dispense-errors-refund-complaints).
 - **Certificates**: serial `PSM-YYYY-XXXXXXXXXX`, **HMAC-signed payload**
   (`CERT_HMAC_KEY`); public rate-limited `GET /v1/certificates/verify/{serial}`
   (20/min per client, 429 beyond).
@@ -236,6 +272,8 @@ missing — each component logs `profile=dev|prod component=<name>` at boot.
 | `KAFKA_BROKERS` | comma list (Redpanda; franz-go producer/consumer, group = service name) | unset → embedded inproc bus |
 | `NIMC_API_URL` / `NIMC_API_KEY` | NIMC identity adapter (`POST {url}/verify`, HMAC-signed, retry+breaker) | unset → simulator |
 | `PSSP_API_URL` / `PSSP_API_KEY` | PSSP payment adapter (init/capture/verify, HMAC-signed, retry+breaker); also the webhook HMAC secret | unset → simulators |
+| `PSSP_WEBHOOK_SCHEME_<P>` / `PSSP_WEBHOOK_SECRET_<P>` | per-PSSP webhook signature scheme (`hmac-sha256`/`hmac-sha512`/`verif-hash`) + secret (G3) | scheme per registry, shared secret |
+| `PSSP_FEE_RATE_BPS_<P>` / `PSSP_FEE_CAP_KOBO_<P>` | per-PSSP fee schedule override (G12); documented default CBN MSC 0.5% capped ₦2,000 | per-provider schedule |
 | `USSD_AGGREGATOR_URL` / `USSD_AGGREGATOR_KEY` | aggregator outbound notify + inbound webhook HMAC verification | unset → simulator/unsigned dev |
 | `STORE_FILE` | embedded store persistence path (dev) | in-memory |
 | `TIN_GRAPH_URL` / `CONSENT_URL` / `LEDGER_URL` / `REG_WATCH_URL` / `NIN_HMAC_KEY` / `TIN_HMAC_KEY` / `CERT_HMAC_KEY` / `GATE_FILE` | suite-local rails (see service sections) | dev fallbacks |
