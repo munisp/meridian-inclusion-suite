@@ -61,8 +61,9 @@ export async function fetchFloatBalance(agentId: string): Promise<any> {
   return resp.data
 }
 
-export const naira = (kobo: number) =>
-  '₦' + (kobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+// Money formatting lives in lib/format (Meridian One §9); `naira` kept as a
+// back-compat alias — formatNGN is the only formatter.
+export { formatNGN as naira } from './lib/format'
 
 // Device enrolment (audit fix #6): registers this device's signing key with
 // the server so offline receipts become server-verifiable.
