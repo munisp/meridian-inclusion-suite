@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 
@@ -23,6 +24,42 @@ type server struct {
 	devices *DeviceService
 	bus     events.Bus
 	pssps   *PSSPRegistry
+	nip     *NIPService // nil until first NIP route use (lazy, env-fail-closed)
+	nipErr  error
+	nipOnce sync.Once
+}
+
+// nipRoutes lazily builds the NIP rail service (fail-closed: if the live
+// rail is misconfigured/unreachable, NIP endpoints return 503 rather than
+// silently degrading to the simulator) and mounts the NIP surface. Minimal
+// additive hook — no changes to the payments/disputes core paths.
+func (s *server) nipRoutes(mux *http.ServeMux) {
+	init := func() (*NIPService, error) {
+		s.nipOnce.Do(func() {
+			// reuse the payment service's durable store for transfer records
+			s.nip, s.nipErr = NewNIPServiceFromEnv(s.pay.st, s.bus)
+			if s.nipErr == nil {
+				s.nip.StartTSQSweeper(nipSweepInterval(), make(chan struct{}))
+			}
+		})
+		return s.nip, s.nipErr
+	}
+	guard := func(fn func(nipHTTP, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			svc, err := init()
+			if err != nil {
+				httpx.WriteProblem(w, http.StatusServiceUnavailable, "nip_unavailable", err.Error())
+				return
+			}
+			fn(nipHTTP{svc: svc}, w, r)
+		}
+	}
+	mux.HandleFunc("POST /v1/nip/name-enquiry", guard(nipHTTP.nameEnquiry))
+	mux.HandleFunc("POST /v1/nip/payout", guard(nipHTTP.payout))
+	mux.HandleFunc("POST /v1/nip/refund", guard(nipHTTP.refund))
+	mux.HandleFunc("POST /v1/nip/reversal", guard(nipHTTP.reversal))
+	mux.HandleFunc("GET /v1/nip/transfers/{session}", guard(nipHTTP.getTransfer))
+	mux.HandleFunc("POST /v1/nip/sweep", guard(nipHTTP.sweep))
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -76,6 +113,9 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/workflows/{name}/trigger", s.triggerWorkflow)
 	mux.HandleFunc("GET /v1/workflows/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/simulations", s.listSimulations)
+
+	// NIP rail (N1): name enquiry, payout/refund, reversal, TSQ sweep
+	s.nipRoutes(mux)
 	return mux
 }
 

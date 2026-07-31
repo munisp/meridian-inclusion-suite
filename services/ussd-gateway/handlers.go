@@ -86,6 +86,13 @@ func (s *server) processInput(sessionID, phone, input string) string {
 			}
 		}
 		sess = &Session{ID: sessionID, Phone: phone, Data: map[string]string{}, CreatedAt: time.Now()}
+		// N2: first-interaction language selection. A returning MSISDN gets
+		// its persisted locale applied; a first-time MSISDN (flag
+		// USSD_LANG_SELECT=1) picks a language before the start menu.
+		if s.startWithLocale(sess) {
+			s.store.Put(sess)
+			return "CON " + render(s.graph.Menus["lang_select"].Text, sess)
+		}
 		s.store.Put(sess)
 		text, cont, err := s.engine.Start(sess)
 		s.store.Put(sess)
@@ -139,6 +146,7 @@ func (s *server) processInput(sessionID, phone, input string) string {
 	// the switched-to language.
 	if lang, ok := langFromDial(input); ok {
 		sess.Data["lang"] = string(lang)
+		s.localeStore().Save(phone, string(lang)) // N2: persist per-MSISDN
 		s.store.Put(sess)
 		m := s.graph.Menus[sess.Menu]
 		return "CON " + T(string(lang), "lang_switched", "") + " " + render(localizedText(sess, m), sess)
@@ -152,9 +160,34 @@ func (s *server) processInput(sessionID, phone, input string) string {
 	if !cont {
 		s.store.Delete(sessionID)
 	} else {
+		// N2: a language picked at lang_select (or otherwise set mid-flow)
+		// persists for the MSISDN's next session.
+		if langSelectEnabled() && sess.Data["lang"] != "" {
+			s.localeStore().Save(phone, sess.Data["lang"])
+		}
 		s.store.Put(sess)
 	}
 	return prefix(text, cont)
+}
+
+// startWithLocale applies the persisted MSISDN locale to a fresh session,
+// or (first-time MSISDN, USSD_LANG_SELECT=1) redirects to the injected
+// lang_select menu. Returns true when the caller should render lang_select
+// instead of engine.Start.
+func (s *server) startWithLocale(sess *Session) bool {
+	if !langSelectEnabled() {
+		return false
+	}
+	ensureLangSelectMenu(s.graph)
+	if lang, ok := s.localeStore().Load(sess.Phone); ok {
+		sess.Data["lang"] = lang
+		return false
+	}
+	if sess.Phone == "" {
+		return false
+	}
+	sess.Menu = "lang_select" // engine.Handle consumes the pick from here
+	return true
 }
 
 func prefix(text string, cont bool) string {
