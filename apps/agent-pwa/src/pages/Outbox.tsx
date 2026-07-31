@@ -27,7 +27,11 @@ export default function Outbox() {
     setBusy(true)
     try {
       const agentId = localStorage.getItem('agent.id') || 'agent-demo-1'
-      const batchId = localStorage.getItem('agent.batchId') || 'batch-default'
+      // DATA-LOSS FIX: a NEW Idempotency-Key per sync attempt. Reusing a key
+      // makes the server replay the first batch's result and drop the new
+      // items. Safe retries of THIS attempt are still deduped by the server
+      // via per-item client_ref.
+      const batchId = 'batch-' + crypto.randomUUID()
       const result = await syncBatch(agentId, batchId, items.map((r) => r.item))
       const createdOrResolved = new Set(
         result.results.filter((r) => r.outcome !== 'rejected').map((r) => r.client_ref),

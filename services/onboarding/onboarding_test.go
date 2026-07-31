@@ -143,3 +143,45 @@ func TestConsentLocalFallback(t *testing.T) {
 		t.Fatalf("expected revoked consent, got %+v err=%v", rev, err)
 	}
 }
+
+// TestTwoBatchesWithDifferentKeysBothIngest is the regression test for the
+// PWA idempotency-key-reuse data-loss bug (Capture.tsx persisted one batchId
+// forever): two batches with DIFFERENT Idempotency-Keys must both ingest.
+func TestTwoBatchesWithDifferentKeysBothIngest(t *testing.T) {
+	st, reg, _ := newTestStack(t)
+	cap := NewCaptureService(st, reg, NIMCSimulator{})
+	now := time.Now().UTC().Format(time.RFC3339)
+	b1, err := cap.Ingest("agent-1", "batch-key-A", []CaptureItem{{
+		ClientRef: "ref-a", NIN: "12345678901", FullName: "First Operator", CapturedAt: now,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b1.Results[0].Outcome != "created" {
+		t.Fatalf("batch A must create, got %+v", b1.Results[0])
+	}
+	// Second batch, new key (what the fixed PWA now sends per sync attempt).
+	b2, err := cap.Ingest("agent-1", "batch-key-B", []CaptureItem{{
+		ClientRef: "ref-b", NIN: "12345678902", FullName: "Second Operator", CapturedAt: now,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.Status != "processed" || b2.Results[0].Outcome != "created" {
+		t.Fatalf("batch B with a fresh key must ingest, got status=%s result=%+v", b2.Status, b2.Results[0])
+	}
+	// And the server still dedups a retried batch on the SAME key.
+	b2r, err := cap.Ingest("agent-1", "batch-key-B", []CaptureItem{{
+		ClientRef: "ref-b", NIN: "12345678902", FullName: "Second Operator", CapturedAt: now,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2r.Status != "duplicate" {
+		t.Fatalf("same key must still replay as duplicate, got %s", b2r.Status)
+	}
+	ops, _ := reg.List()
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 operators (one per batch), got %d", len(ops))
+	}
+}
