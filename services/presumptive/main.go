@@ -23,6 +23,7 @@ func main() {
 		log.Fatalf("band engine: %v", err)
 	}
 	hub := NewPSSPHub()
+	psspReg := NewPSSPRegistry(st, hub)
 	gates := NewGateClient()
 	certs := NewCertificateService(st)
 	floats := NewFloatService(st, lc)
@@ -39,6 +40,7 @@ func main() {
 		devices: NewDeviceService(st),
 		bus:     bus,
 		limiter: NewRateLimiter(20, 20.0/60.0), // 20 verify calls/min per client
+		pssps:   psspReg,
 	}
 
 	port := os.Getenv("PORT")

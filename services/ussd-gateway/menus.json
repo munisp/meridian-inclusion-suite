@@ -7,10 +7,22 @@
       "type": "options",
       "text": "Welcome to NRS Tax Services\n1. Register (Onboarding)\n2. TIN provision status\n3. Pay presumptive levy\n4. Verify certificate",
       "options": [
-        { "key": "1", "next": "onb_nin" },
-        { "key": "2", "next": "onb_tin_input" },
-        { "key": "3", "next": "psm_state" },
-        { "key": "4", "next": "cert_input" }
+        {
+          "key": "1",
+          "next": "onb_nin"
+        },
+        {
+          "key": "2",
+          "next": "onb_tin_input"
+        },
+        {
+          "key": "3",
+          "next": "psm_state"
+        },
+        {
+          "key": "4",
+          "next": "cert_input"
+        }
       ]
     },
     "onb_nin": {
@@ -33,9 +45,27 @@
       "type": "options",
       "text": "Select your state:\n1. Lagos\n2. Kano\n3. Other",
       "options": [
-        { "key": "1", "next": "onb_register", "set": { "state": "Lagos" } },
-        { "key": "2", "next": "onb_register", "set": { "state": "Kano" } },
-        { "key": "3", "next": "onb_register", "set": { "state": "Federal" } }
+        {
+          "key": "1",
+          "next": "onb_register",
+          "set": {
+            "state": "Lagos"
+          }
+        },
+        {
+          "key": "2",
+          "next": "onb_register",
+          "set": {
+            "state": "Kano"
+          }
+        },
+        {
+          "key": "3",
+          "next": "onb_register",
+          "set": {
+            "state": "Federal"
+          }
+        }
       ]
     },
     "onb_register": {
@@ -74,31 +104,109 @@
       "type": "options",
       "text": "Presumptive levy - select state:\n1. Lagos\n2. Kano\n3. Other (federal schedule)",
       "options": [
-        { "key": "1", "next": "psm_trade", "set": { "state": "Lagos" } },
-        { "key": "2", "next": "psm_trade", "set": { "state": "Kano" } },
-        { "key": "3", "next": "psm_trade", "set": { "state": "Federal" } }
+        {
+          "key": "1",
+          "next": "psm_trade",
+          "set": {
+            "state": "Lagos"
+          }
+        },
+        {
+          "key": "2",
+          "next": "psm_trade",
+          "set": {
+            "state": "Kano"
+          }
+        },
+        {
+          "key": "3",
+          "next": "psm_trade",
+          "set": {
+            "state": "Federal"
+          }
+        }
       ]
     },
     "psm_trade": {
       "type": "options",
       "text": "Select your trade:\n1. Food vendor\n2. Tailoring\n3. Artisan\n4. Transport\n5. Retail\n6. Services",
       "options": [
-        { "key": "1", "next": "psm_turnover", "set": { "trade": "food_vendor" } },
-        { "key": "2", "next": "psm_turnover", "set": { "trade": "tailoring" } },
-        { "key": "3", "next": "psm_turnover", "set": { "trade": "artisan" } },
-        { "key": "4", "next": "psm_turnover", "set": { "trade": "transport" } },
-        { "key": "5", "next": "psm_turnover", "set": { "trade": "retail" } },
-        { "key": "6", "next": "psm_turnover", "set": { "trade": "services" } }
+        {
+          "key": "1",
+          "next": "psm_turnover",
+          "set": {
+            "trade": "food_vendor"
+          }
+        },
+        {
+          "key": "2",
+          "next": "psm_turnover",
+          "set": {
+            "trade": "tailoring"
+          }
+        },
+        {
+          "key": "3",
+          "next": "psm_turnover",
+          "set": {
+            "trade": "artisan"
+          }
+        },
+        {
+          "key": "4",
+          "next": "psm_turnover",
+          "set": {
+            "trade": "transport"
+          }
+        },
+        {
+          "key": "5",
+          "next": "psm_turnover",
+          "set": {
+            "trade": "retail"
+          }
+        },
+        {
+          "key": "6",
+          "next": "psm_turnover",
+          "set": {
+            "trade": "services"
+          }
+        }
       ]
     },
     "psm_turnover": {
       "type": "options",
       "text": "Annual turnover:\n1. Up to N800,000\n2. N800,001 - N1,000,000\n3. N1m - N5m\n4. N5m - N25m",
       "options": [
-        { "key": "1", "next": "psm_band", "set": { "turnover_kobo": "50000000" } },
-        { "key": "2", "next": "psm_band", "set": { "turnover_kobo": "90000000" } },
-        { "key": "3", "next": "psm_band", "set": { "turnover_kobo": "300000000" } },
-        { "key": "4", "next": "psm_band", "set": { "turnover_kobo": "1500000000" } }
+        {
+          "key": "1",
+          "next": "psm_band",
+          "set": {
+            "turnover_kobo": "50000000"
+          }
+        },
+        {
+          "key": "2",
+          "next": "psm_band",
+          "set": {
+            "turnover_kobo": "90000000"
+          }
+        },
+        {
+          "key": "3",
+          "next": "psm_band",
+          "set": {
+            "turnover_kobo": "300000000"
+          }
+        },
+        {
+          "key": "4",
+          "next": "psm_band",
+          "set": {
+            "turnover_kobo": "1500000000"
+          }
+        }
       ]
     },
     "psm_band": {
@@ -115,8 +223,14 @@
       "type": "options",
       "text": "Band: {{band}}\nAnnual levy: N{{levy_naira}} (incl. admin fee N{{fee_naira}})\n1. Pay now\n2. Cancel",
       "options": [
-        { "key": "1", "next": "psm_pay" },
-        { "key": "2", "next": "psm_cancel" }
+        {
+          "key": "1",
+          "next": "psm_pay"
+        },
+        {
+          "key": "2",
+          "next": "psm_cancel"
+        }
       ]
     },
     "psm_cancel": {
@@ -158,6 +272,10 @@
     "cert_bad": {
       "type": "end",
       "text": "Certificate {{serial}} could not be verified: {{error}}"
+    },
+    "onb_pending": {
+      "type": "end",
+      "text": "Registration received, {{name}}.\nYour NIN verification is PENDING REVIEW.\nAn NRS agent will complete your registration. Dial *347*88# option 2 to check status.\nRef: {{operator_id}}"
     }
   }
 }

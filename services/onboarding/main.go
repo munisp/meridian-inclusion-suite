@@ -9,6 +9,7 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
 )
 
 func main() {
@@ -23,8 +24,22 @@ func main() {
 	consent := NewConsentService(st)
 	capture := NewCaptureService(st, reg, verifier)
 	lc := ledger.NewClientFromEnv()
-	wf := NewWorkflows(st, reg, verifier, provisioner, consent, lc, bus)
+	// O1: durable workflow runner — TEMPORAL_URL required (fail-closed) in prod.
+	runner, err := workflowx.NewRunnerFromEnv(storeRunStore{st}, nil)
+	if err != nil {
+		log.Fatalf("workflow runner: %v", err)
+	}
+	wf := NewWorkflowsWithRunner(st, reg, verifier, provisioner, consent, lc, bus, runner)
 
+	// O4: document backend — MinIO WORM presign in prod, dev FS fallback.
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+	docBackend, err := NewDocBackendFromEnv(dataDir)
+	if err != nil {
+		log.Fatalf("doc backend: %v", err)
+	}
 	srv := &server{
 		registry:     reg,
 		verifier:     verifier,
@@ -34,6 +49,11 @@ func main() {
 		workflows:    wf,
 		associations: NewAssociationService(st, reg, capture),
 		crdt:         NewCRDTMergeService(),
+		agents:       NewAgentRegistry(st),
+		docs:         NewDocService(st, reg, docBackend),
+	}
+	if fs, ok := docBackend.(*fsDocBackend); ok {
+		srv.fsBackend = fs
 	}
 
 	port := os.Getenv("PORT")

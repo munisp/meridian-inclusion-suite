@@ -20,6 +20,7 @@ type server struct {
 	limiter *RateLimiter
 	devices *DeviceService
 	bus     events.Bus
+	pssps   *PSSPRegistry
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -39,8 +40,15 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/payments/{id}/capture", s.capturePayment)
 	mux.HandleFunc("POST /v1/payments/{id}/void", s.voidPayment)
 
-	// PSSP webhooks (public but HMAC-signed)
+	// PSSP webhooks (public but per-PSSP HMAC-signed)
 	mux.HandleFunc("POST /v1/pssp/webhook/{provider}", s.psspWebhook)
+
+	// PSSP registry (O6 onboarding)
+	mux.HandleFunc("POST /v1/pssps", s.onboardPSSP)
+	mux.HandleFunc("GET /v1/pssps", s.listPSSPs)
+	mux.HandleFunc("GET /v1/pssps/{id}", s.getPSSP)
+	mux.HandleFunc("POST /v1/pssps/{id}/rotate-secret", s.rotatePSSPSecret)
+	mux.HandleFunc("POST /v1/pssps/{id}/status", s.setPSSPStatus)
 
 	// certificates (public verify, rate-limited)
 	mux.HandleFunc("GET /v1/certificates/verify/{serial}", s.verifyCertificate)
@@ -161,7 +169,7 @@ func (s *server) psspWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
-	if !VerifyWebhookSignature(r.Header.Get("X-PSSP-Signature"), body) {
+	if !s.pssps.VerifyWebhook(r.PathValue("provider"), r.Header.Get("X-PSSP-Signature"), body) {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "bad_signature", "X-PSSP-Signature HMAC validation failed")
 		return
 	}
@@ -180,6 +188,65 @@ func (s *server) psspWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, p)
+}
+
+// --- PSSP registry handlers (O6) ---
+
+func (s *server) onboardPSSP(w http.ResponseWriter, r *http.Request) {
+	var in OnboardRequest
+	if err := httpx.DecodeJSON(r, &in); err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	res, err := s.pssps.Onboard(in)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusConflict, "onboard_error", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, res)
+}
+
+func (s *server) listPSSPs(w http.ResponseWriter, r *http.Request) {
+	out, err := s.pssps.List()
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"pssps": out, "count": len(out)})
+}
+
+func (s *server) getPSSP(w http.ResponseWriter, r *http.Request) {
+	v, ok, err := s.pssps.Get(r.PathValue("id"))
+	if err != nil || !ok {
+		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "PSSP not found")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, v)
+}
+
+func (s *server) rotatePSSPSecret(w http.ResponseWriter, r *http.Request) {
+	res, err := s.pssps.RotateSecret(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+func (s *server) setPSSPStatus(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Status string `json:"status"`
+	}
+	if err := httpx.DecodeJSON(r, &in); err != nil || in.Status == "" {
+		httpx.WriteProblem(w, http.StatusBadRequest, "validation", "status is required")
+		return
+	}
+	v, err := s.pssps.SetStatus(r.PathValue("id"), in.Status)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusConflict, "illegal_transition", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, v)
 }
 
 func (s *server) verifyCertificate(w http.ResponseWriter, r *http.Request) {
