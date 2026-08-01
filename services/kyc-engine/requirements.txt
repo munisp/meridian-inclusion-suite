@@ -19,7 +19,7 @@ temporalio>=1.8                 # TEMPORAL_URL set -> durable workflows
 # --- CPU inference stack (image build; ~1.9GB) ---
 docling>=2.0
 paddlepaddle==2.6.*
-paddleocr>=2.8
+paddleocr>=2.8,<4.0  # 2.x & 3.x both supported (stage_ocr is signature-tolerant); 4.x unvetted
 onnxruntime==1.19.*
 insightface==0.7.3
 mediapipe==0.10.*
