@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -36,14 +37,20 @@ class KycCase(Base):
     # approved|rejected|failed
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # optional declared transaction/relationship value feeding the HIGH_VALUE
-    # EDD trigger (edd_high_value_threshold); None = not declared
-    declared_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # EDD trigger (edd_high_value_threshold); None = not declared.
+    # Numeric, not Float: money as binary float loses kobo precision (audit P1).
+    declared_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 2), nullable=True)
     decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
     reason_codes: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     documents: Mapped[list["KycDocument"]] = relationship(back_populates="case")
     checks: Mapped[list["KycCheck"]] = relationship(back_populates="case")
+
+    __table_args__ = (
+        # work-queue query: cases by status ordered by creation
+        Index("ix_kyc_case_status_created", "status", "created_at"),
+    )
 
 
 class KycDocument(Base):
@@ -117,6 +124,11 @@ class AuditEvent(Base):
     hash: Mapped[str] = mapped_column(String(64), default="")
     published: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        # outbox drain query: unpublished events in creation order
+        Index("ix_kyc_audit_unpub", "published", "created_at"),
+    )
 
 
 class LivenessSession(Base):
