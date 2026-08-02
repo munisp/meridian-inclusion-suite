@@ -11,6 +11,7 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 type server struct {
@@ -27,6 +28,28 @@ type server struct {
 	nip     *NIPService // nil until first NIP route use (lazy, env-fail-closed)
 	nipErr  error
 	nipOnce sync.Once
+	// guard is the PSSP webhook replay guard (audit funds-flow #5):
+	// X-PSSP-Timestamp within ±5 min + signature-as-nonce replay cache.
+	// Nil-safe: when nil the check is skipped (unit tests with bare servers).
+	guard *webhookguard.Guard
+}
+
+// checkWebhookReplay applies the webhook replay guard when configured:
+// replays dedup to 409; stale/malformed/missing (prod) timestamps 401.
+func (s *server) checkWebhookReplay(w http.ResponseWriter, r *http.Request) bool {
+	if s.guard == nil {
+		return true
+	}
+	err := s.guard.Check(r)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, webhookguard.ErrReplay) {
+		httpx.WriteProblem(w, http.StatusConflict, "replay", "duplicate webhook delivery (signature already seen)")
+		return false
+	}
+	httpx.WriteProblem(w, http.StatusUnauthorized, "unauthorized", err.Error())
+	return false
 }
 
 // nipRoutes lazily builds the NIP rail service (fail-closed: if the live
@@ -221,6 +244,17 @@ func (s *server) psspWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.pay.hub.VerifyWebhookSignatureFor(provider, sig, body) {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "bad_signature", "webhook signature validation failed for provider scheme")
+		return
+	}
+	// Replay guard (audit funds-flow #5): fresh X-PSSP-Timestamp + the
+	// (verified) signature as the replay nonce, so a captured valid
+	// signature cannot be replayed outside the tolerance window and a
+	// redelivery within it dedups to 409. Canonicalise the nonce header
+	// for the Flutterwave verif-hash scheme.
+	if sig != "" && r.Header.Get("X-PSSP-Signature") == "" {
+		r.Header.Set("X-PSSP-Signature", sig)
+	}
+	if !s.checkWebhookReplay(w, r) {
 		return
 	}
 	var payload WebhookPayload

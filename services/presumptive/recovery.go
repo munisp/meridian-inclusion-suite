@@ -67,6 +67,22 @@ func (r *RecoverySweeper) SweepOnce() (resumed, compensated, expired int, err er
 			if r.expireIntent(&p) {
 				expired++
 			}
+		case "capture_in_flight":
+			// Audit funds-flow #4: a capture whose transport errored and
+			// whose provider state was indeterminate. Re-verify and either
+			// resume the saga (money moved) or fail + void the hold.
+			switch r.resolveCaptureInFlight(&p) {
+			case "resumed":
+				resumed++
+			case "compensated":
+				compensated++
+			}
+		case "failed":
+			// Terminal-failed payments must not hold funds: void any
+			// dangling pending hold left by an earlier failure path.
+			if r.voidFailedHold(&p) {
+				compensated++
+			}
 		}
 	}
 	return resumed, compensated, expired, nil
@@ -111,6 +127,62 @@ func (r *RecoverySweeper) resumeCapture(p *Payment) string {
 		"amount_kobo": p.AmountKobo, "tin_hash": p.TINHash, "certificate_serial": cert.Serial,
 	}))
 	return "resumed"
+}
+
+// resolveCaptureInFlight re-verifies an indeterminate capture at the
+// provider and resolves it: captured -> persist captured_awaiting_post and
+// resume the saga; anything else -> terminal fail + hold void. A verify
+// error leaves the payment for the next sweep. Returns
+// "resumed"/"compensated"/"pending".
+func (r *RecoverySweeper) resolveCaptureInFlight(p *Payment) string {
+	adapter, err := r.pay.hub.Adapter(p.Provider)
+	if err != nil {
+		log.Printf("recovery: payment %s: no adapter for %s (%v); leaving capture_in_flight", p.ID, p.Provider, err)
+		return "pending"
+	}
+	vr, verr := adapter.Verify(p.PSSPRef)
+	if verr != nil {
+		log.Printf("recovery: payment %s verify indeterminate (%v); leaving capture_in_flight", p.ID, verr)
+		return "pending"
+	}
+	if vr.Status != "captured" {
+		// confirmed-not-done: terminal fail + void the hold
+		r.pay.failCaptureConfirmed(p, "recovery: capture confirmed not done at provider: "+vr.Detail)
+		return "compensated"
+	}
+	// Money moved: persist the saga point-of-no-return state (same single
+	// durable write as the happy path) and resume.
+	p.Status = "captured_awaiting_post"
+	p.PostTransferID = ledger.DeterministicTransferID("psm-post:" + p.ID)
+	p.FeeKobo = p.AmountKobo - vr.SettledKobo
+	p.UpdatedAt = nowRFC3339()
+	if err := r.pay.st.Put("payments", p.ID, *p); err != nil {
+		log.Printf("recovery: payment %s persist captured_awaiting_post: %v", p.ID, err)
+		return "pending"
+	}
+	return r.resumeCapture(p)
+}
+
+// voidFailedHold releases a dangling pending hold on a terminal-failed
+// payment. Idempotent; returns true when a hold was voided.
+func (r *RecoverySweeper) voidFailedHold(p *Payment) bool {
+	if p.PendingTransferID == "" {
+		return false
+	}
+	t, err := r.lc.LookupTransfer(p.PendingTransferID)
+	if err != nil || !t.Pending {
+		return false
+	}
+	if _, err := r.lc.VoidPending(p.PendingTransferID); err != nil {
+		log.Printf("recovery: failed payment %s: void hold: %v", p.ID, err)
+		return false
+	}
+	p.UpdatedAt = nowRFC3339()
+	if err := r.pay.st.Put("payments", p.ID, *p); err != nil {
+		return false
+	}
+	log.Printf("recovery: voided dangling hold on failed payment %s", p.ID)
+	return true
 }
 
 // expireIntent voids the pending hold of an abandoned intent.
