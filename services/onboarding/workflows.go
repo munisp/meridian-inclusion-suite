@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -400,6 +401,27 @@ func (w *Workflows) payoutMarked(agentID, period string) bool {
 	return err == nil && ok
 }
 
+// nextPayoutPendingID finds the next fresh deterministic pending-transfer id
+// for a payout whose earlier attempt ids were voided after post failures.
+// Deterministic given ledger state, so concurrent/crashed re-runs converge.
+func (w *Workflows) nextPayoutPendingID(agentID, period, poolID, acctID string, amount uint64) (string, error) {
+	base := ledger.DeterministicTransferID("comm-pending:" + agentID + ":" + period)
+	for i := 1; i <= 100; i++ {
+		cand := ledger.DeterministicTransferID(fmt.Sprintf("%s:r%d", base, i))
+		if _, err := w.ledger.PendingTransfer(ledger.Transfer{
+			ID: cand, DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
+			Code: ledger.CodeSettle, Amount: amount, UserData: "commission:" + agentID + ":" + period,
+		}); err != nil {
+			if errors.Is(err, ledger.ErrTransferIDConflict) {
+				continue // this attempt id was already consumed/voided
+			}
+			return "", err
+		}
+		return cand, nil
+	}
+	return "", fmt.Errorf("exhausted payout attempt ids for %s:%s", agentID, period)
+}
+
 func (w *Workflows) markPayout(agentID, period string, amount uint64, transferID string) error {
 	return w.st.Put("commission_payouts", payoutKey(agentID, period), CommissionPayout{
 		AgentID: agentID, Period: period, AmountKobo: amount, TransferID: transferID, PaidAt: nowRFC3339(),
@@ -474,24 +496,49 @@ func (w *Workflows) commissionSettlement(period string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		// payout saga: pending -> mark -> post (compensation voids)
+		// payout saga: pending -> post -> mark-paid. The durable marker is
+		// written ONLY after a successful post (audit funds-flow #2): a post
+		// failure voids the pending and leaves no marker, so a re-run retries
+		// the agent instead of permanently skipping an unpaid payout. All
+		// transfer ids are deterministic, so a crash between the post and the
+		// marker replays the post idempotently on re-run and then marks.
 		pendID := ledger.DeterministicTransferID("comm-pending:" + agentID + ":" + period)
 		postID := ledger.DeterministicTransferID("comm-post:" + agentID + ":" + period)
+		posted := false
 		if _, err := w.ledger.PendingTransfer(ledger.Transfer{
 			ID: pendID, DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
 			Code: ledger.CodeSettle, Amount: amount, UserData: "commission:" + agentID + ":" + period,
 		}); err != nil {
-			return nil, fmt.Errorf("settle agent %s (pending): %w", agentID, err)
+			if !errors.Is(err, ledger.ErrTransferIDConflict) {
+				return nil, fmt.Errorf("settle agent %s (pending): %w", agentID, err)
+			}
+			// The deterministic pending id already exists in a terminal form
+			// (an earlier run reached the post or its compensation):
+			//   - post transfer present: crash between post and marker —
+			//     skip to the marker write (the post replay below is a no-op);
+			//   - otherwise: an earlier attempt was voided after a post
+			//     failure — retry under a fresh deterministic attempt id.
+			if _, perr := w.ledger.LookupTransfer(postID); perr == nil {
+				posted = true
+			} else {
+				pendID, err = w.nextPayoutPendingID(agentID, period, poolID, acctID, amount)
+				if err != nil {
+					return nil, fmt.Errorf("settle agent %s (pending retry): %w", agentID, err)
+				}
+			}
 		}
-		// durable marker BEFORE the post: crash after the post replays via
-		// PostPendingAs idempotency, never a second transfer.
+		if !posted {
+			if _, err := w.ledger.PostPendingAs(pendID, postID, amount); err != nil {
+				_, _ = w.ledger.VoidPending(pendID) // compensation
+				// belt-and-braces: never leave a paid marker for an unposted payout
+				_, _ = w.st.Delete("commission_payouts", payoutKey(agentID, period))
+				return nil, fmt.Errorf("settle agent %s (post): %w", agentID, err)
+			}
+		}
 		if err := w.markPayout(agentID, period, amount, postID); err != nil {
-			_, _ = w.ledger.VoidPending(pendID) // compensation
-			return nil, err
-		}
-		if _, err := w.ledger.PostPendingAs(pendID, postID, amount); err != nil {
-			_, _ = w.ledger.VoidPending(pendID) // compensation
-			return nil, fmt.Errorf("settle agent %s (post): %w", agentID, err)
+			// post landed under a deterministic id; a re-run replays the post
+			// idempotently and re-attempts the marker — no double-pay.
+			return nil, fmt.Errorf("settle agent %s (mark payout): %w", agentID, err)
 		}
 		settled[agentID] = amount
 	}

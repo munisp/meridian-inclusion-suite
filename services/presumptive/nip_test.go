@@ -299,3 +299,87 @@ func TestRefundPathGatedAndRecorded(t *testing.T) {
 		t.Fatal("refund must honour the name-enquiry gate")
 	}
 }
+
+// countingRail wraps a rail and counts FundsTransfer dispatches.
+type countingRail struct {
+	NIPRail
+	dispatches int
+}
+
+func (r *countingRail) FundsTransfer(req NIPTransferRequest) (NIPTransferResult, error) {
+	r.dispatches++
+	return r.NIPRail.FundsTransfer(req)
+}
+
+// 18. Audit funds-flow #1: the durable in_flight record is written BEFORE
+// the rail dispatch, so a client retry with the same idempotency key while
+// the transfer is in flight returns the same record (same session id) and
+// NEVER triggers a second rail dispatch. The crash-after-dispatch window
+// (transport success, process killed before the record update) is now
+// impossible by construction: the record exists before dispatch, and the
+// TSQ sweeper adopts and reconciles it.
+func TestPayoutRetryDuringInflightSingleRailCall(t *testing.T) {
+	rail := &countingRail{NIPRail: NewNIPSim()}
+	svc := nipTestService(t, rail, true)
+	req := payoutReq("0123456789")
+	req.Narration = "HANG " + req.Narration // sim trigger: dispatch hangs in flight
+	req.IdempotencyKey = "idem-inflight-retry"
+
+	a, err := svc.Payout(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != NIPStatusInFlight {
+		t.Fatalf("expected in_flight, got %s", a.Status)
+	}
+	// the pre-dispatch record is durable under BOTH lookup keys
+	if ok, _ := svc.st.Get("nip_transfers", "idem:"+req.IdempotencyKey, &NIPTransfer{}); !ok {
+		t.Fatal("pre-dispatch idempotency record must exist before rail dispatch")
+	}
+	if ok, _ := svc.st.Get("nip_transfers", a.SessionID, &NIPTransfer{}); !ok {
+		t.Fatal("pre-dispatch session record must exist before rail dispatch")
+	}
+
+	// client retry while in flight: same record, NO second rail call
+	b, err := svc.Payout(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SessionID != a.SessionID || b.Status != NIPStatusInFlight {
+		t.Fatalf("retry must return the in-flight record, got %+v", b)
+	}
+	if rail.dispatches != 1 {
+		t.Fatalf("retry during in-flight must not re-dispatch: %d rail calls", rail.dispatches)
+	}
+
+	// the TSQ sweeper adopts the in-flight record and resolves it
+	n, err := svc.SweepTSQ()
+	if err != nil || n != 1 {
+		t.Fatalf("sweeper adoption: n=%d err=%v", n, err)
+	}
+	c, err := svc.Payout(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Status == NIPStatusInFlight || c.SessionID != a.SessionID {
+		t.Fatalf("post-sweep retry must return the resolved record, got %+v", c)
+	}
+	if rail.dispatches != 1 {
+		t.Fatalf("still exactly one rail dispatch expected, got %d", rail.dispatches)
+	}
+}
+
+// 19. An idempotency key reused with a DIFFERENT payload is rejected, not
+// silently bound to the original transfer.
+func TestPayoutIdempotencyKeyConflict(t *testing.T) {
+	svc := nipTestService(t, NewNIPSim(), true)
+	req := payoutReq("0123456789")
+	req.IdempotencyKey = "idem-conflict"
+	if _, err := svc.Payout(req); err != nil {
+		t.Fatal(err)
+	}
+	req.AmountKobo = 999_999 // same key, different amount
+	if _, err := svc.Payout(req); err == nil {
+		t.Fatal("idempotency-key reuse with a different payload must be rejected")
+	}
+}

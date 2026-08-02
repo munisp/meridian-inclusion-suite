@@ -7,8 +7,10 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 func main() {
@@ -44,6 +46,9 @@ func main() {
 		bus:     bus,
 		limiter: NewRateLimiter(20, 20.0/60.0), // 20 verify calls/min per client
 		pssps:   psspReg,
+		// Webhook replay guard (audit funds-flow #5): timestamp tolerance
+		// ±5 min + signature nonce cache; fail-closed in profile=prod.
+		guard: webhookguard.NewGuard("X-PSSP-Timestamp", "X-PSSP-Signature", keyx.Prod(), nil),
 	}
 
 	port := os.Getenv("PORT")

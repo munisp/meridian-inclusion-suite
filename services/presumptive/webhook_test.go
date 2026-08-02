@@ -2,9 +2,15 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 // authorisedPayment runs intent -> PSSP authorise and returns the payment in
@@ -140,5 +146,78 @@ func TestWebhookOutOfOrderAuthAfterCapture(t *testing.T) {
 	}
 	if again.Status != "captured" {
 		t.Fatalf("redelivery must not regress state, got %s", again.Status)
+	}
+}
+
+// --- PSSP webhook replay guard (audit funds-flow #5) ---
+
+// signedWebhookRequest builds a properly signed PSSP webhook HTTP request
+// with the given timestamp header.
+func signedWebhookRequest(t *testing.T, p Payment, ts string) *http.Request {
+	t.Helper()
+	body := []byte(`{"reference":"` + p.PSSPRef + `","event":"charge.successful","amount_kobo":` +
+		fmt.Sprint(p.AmountKobo) + `,"currency":"NGN"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/pssp/webhook/remita", strings.NewReader(string(body)))
+	req.SetPathValue("provider", "remita")
+	req.Header.Set("X-PSSP-Signature", hmacHex(webhookSecret(), string(body)))
+	if ts != "" {
+		req.Header.Set("X-PSSP-Timestamp", ts)
+	}
+	return req
+}
+
+func guardedServer(ts *testStack) *server {
+	return &server{
+		pay:   ts.pay,
+		guard: webhookguard.NewGuard("X-PSSP-Timestamp", "X-PSSP-Signature", true, nil),
+	}
+}
+
+// A valid signed webhook with a fresh timestamp is accepted; the exact
+// replay (same signature nonce) dedups to 409.
+func TestPSSPWebhookReplayGuardDedups(t *testing.T) {
+	ts := newTestStack(t)
+	p := authorisedPayment(t, ts, "wh-replay")
+	srv := guardedServer(ts)
+	now := fmt.Sprint(time.Now().Unix())
+
+	rec := httptest.NewRecorder()
+	srv.psspWebhook(rec, signedWebhookRequest(t, p, now))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fresh webhook must be accepted, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	srv.psspWebhook(rec2, signedWebhookRequest(t, p, now))
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("replayed webhook must dedup to 409, got %d (%s)", rec2.Code, rec2.Body.String())
+	}
+}
+
+// A signed webhook with a timestamp outside the ±5 min tolerance is
+// rejected 401, and a missing timestamp (prod fail-closed) is also 401.
+func TestPSSPWebhookReplayGuardStaleAndMissing(t *testing.T) {
+	ts := newTestStack(t)
+	srv := guardedServer(ts)
+
+	p1 := authorisedPayment(t, ts, "wh-stale")
+	stale := fmt.Sprint(time.Now().Add(-10 * time.Minute).Unix())
+	rec := httptest.NewRecorder()
+	srv.psspWebhook(rec, signedWebhookRequest(t, p1, stale))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("stale timestamp must be 401, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	p2 := authorisedPayment(t, ts, "wh-missing")
+	rec2 := httptest.NewRecorder()
+	srv.psspWebhook(rec2, signedWebhookRequest(t, p2, ""))
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("missing timestamp must fail closed with 401, got %d (%s)", rec2.Code, rec2.Body.String())
+	}
+
+	// payments untouched by rejected webhooks
+	got, _, _ := ts.pay.get(p1.ID)
+	if got.Status != "authorised" {
+		t.Fatalf("rejected webhook must not change state, got %+v", got)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -262,11 +263,33 @@ func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error)
 	// a retried capture (crash between PSSP capture and state persist) is a
 	// replay at the provider, not a second charge.
 	capRes, err := adapter.Capture(p.PSSPRef, p.AmountKobo, "capture:"+p.ID)
-	if err != nil || capRes.Status != "captured" {
-		p.Status = "failed"
-		p.FailReason = capRes.Detail
-		p.UpdatedAt = nowRFC3339()
-		_ = s.st.Put("payments", p.ID, p)
+	if err != nil {
+		// Transport error (audit funds-flow #4): the provider may or may not
+		// have captured. Do NOT mark failed blind — verify server-side first
+		// (mirrors the NIP TSQ pattern).
+		vr, verr := adapter.Verify(p.PSSPRef)
+		switch {
+		case verr == nil && vr.Status == "captured":
+			// The provider DID capture despite the transport error: continue
+			// the saga with the verified result.
+			capRes = vr
+		case verr == nil:
+			// Confirmed NOT captured: safe to fail terminally and void the
+			// hold — no money moved at the provider.
+			s.failCaptureConfirmed(&p, "capture rejected at provider (verified): "+vr.Detail)
+			return p, Certificate{}, fmt.Errorf("pssp capture failed: %s", vr.Detail)
+		default:
+			// Indeterminate: leave in a swept state. The recovery sweeper
+			// re-verifies and either resumes the capture or fails+voids.
+			p.Status = "capture_in_flight"
+			p.FailReason = "capture transport error, provider state indeterminate: " + err.Error()
+			p.UpdatedAt = nowRFC3339()
+			_ = s.st.Put("payments", p.ID, p)
+			return p, Certificate{}, fmt.Errorf("pssp capture indeterminate (sweeper will resolve): %w", err)
+		}
+	} else if capRes.Status != "captured" {
+		// Definitive decline from the provider: fail and void the hold.
+		s.failCaptureConfirmed(&p, capRes.Detail)
 		return p, Certificate{}, fmt.Errorf("pssp capture failed: %s", capRes.Detail)
 	}
 	// Saga point of no return: the PSSP has the money. Persist the
@@ -327,6 +350,28 @@ type Compensation struct {
 // transfer back to the payer, (2) refund (fallback: void) the PSSP capture,
 // (3) persist a Compensation record and mark the payment "compensated".
 // Returns a human-readable summary of the compensation outcome.
+// failCaptureConfirmed terminally fails a payment whose capture is
+// CONFIRMED not to have happened at the provider, voiding the pending hold
+// so the payer's funds are released (audit funds-flow #4). Only call this
+// when the provider state is known — indeterminate captures go to
+// capture_in_flight for the sweeper.
+func (s *PaymentService) failCaptureConfirmed(p *Payment, reason string) {
+	if p.PendingTransferID != "" {
+		if t, err := s.lc.LookupTransfer(p.PendingTransferID); err == nil && t.Pending {
+			if _, err := s.lc.VoidPending(p.PendingTransferID); err != nil {
+				log.Printf("capture fail %s: void hold: %v (sweeper retries)", p.ID, err)
+			}
+		}
+	}
+	p.Status = "failed"
+	p.FailReason = reason
+	p.UpdatedAt = nowRFC3339()
+	_ = s.st.Put("payments", p.ID, *p)
+	s.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{
+		"payment_id": p.ID, "status": "failed", "fail_reason": reason, "tin_hash": p.TINHash,
+	}))
+}
+
 func (s *PaymentService) compensateCapture(p *Payment, cause string) string {
 	comp := Compensation{
 		ID:        ids.WithPrefix("cmp"),

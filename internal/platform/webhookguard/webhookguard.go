@@ -4,9 +4,8 @@
 // an in-process store is provided for single-instance deploys; a Redis- or
 // SQL-backed store can implement Store for multi-instance deploys.
 //
-// TODO(presumptive): wire Guard into services/presumptive PSSP webhook
-// (X-PSSP-Timestamp + nonce/signature as the replay key) — intentionally
-// left to the presumptive-semantics branch to avoid conflicts.
+// Wired into the ussd-gateway aggregator webhook and the presumptive PSSP
+// webhook (X-PSSP-Timestamp + signature as the replay key).
 package webhookguard
 
 import (
