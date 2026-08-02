@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"net/http"
@@ -41,6 +42,9 @@ type NIPTransfer struct {
 	Narration      string `json:"narration"`
 	Status         string `json:"status"` // success|failed|in_flight|reversed
 	Detail         string `json:"detail,omitempty"`
+	// RequestHash binds the idempotency key to the exact request payload;
+	// a retry with the same key but a different payload is rejected.
+	RequestHash string `json:"request_hash,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -110,9 +114,15 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// idempotent retry: same key -> same record (and same session id on the rail)
+	reqHash := payoutRequestHash(req)
+	// idempotent retry: same key -> same record (and same session id on the
+	// rail). An in_flight record is returned as-is (the TSQ sweeper resolves
+	// it); the client must NOT trigger a second rail dispatch.
 	var existing NIPTransfer
 	if ok, _ := s.st.Get("nip_transfers", "idem:"+req.IdempotencyKey, &existing); ok {
+		if existing.RequestHash != "" && existing.RequestHash != reqHash {
+			return NIPTransfer{}, fmt.Errorf("idempotency_key %q already used with a different request", tail4(req.IdempotencyKey))
+		}
 		return existing, nil
 	}
 
@@ -142,6 +152,20 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	}
 
 	t.SessionID = NewNIPSessionID()
+	t.RequestHash = reqHash
+	// Durable in_flight record BEFORE the rail dispatch, in the same
+	// critical section as the idempotency check (audit funds-flow #1): a
+	// crash after dispatch leaves a record the TSQ sweeper adopts and
+	// reconciles, and a client retry with the same idempotency key returns
+	// this record (same session id) instead of sending a second transfer.
+	t.Status = NIPStatusInFlight
+	t.Detail = "dispatched: awaiting rail result"
+	if err := s.st.Put("nip_transfers", "idem:"+t.IdempotencyKey, t); err != nil {
+		return NIPTransfer{}, fmt.Errorf("persist pre-dispatch record: %w", err)
+	}
+	if err := s.st.Put("nip_transfers", t.SessionID, t); err != nil {
+		return NIPTransfer{}, fmt.Errorf("persist pre-dispatch record: %w", err)
+	}
 	res, err := s.rail.FundsTransfer(NIPTransferRequest{
 		SessionID:      t.SessionID,
 		AmountKobo:     t.AmountKobo,
@@ -152,18 +176,35 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 		IdempotencyKey: t.IdempotencyKey,
 	})
 	if err != nil {
-		return NIPTransfer{}, fmt.Errorf("funds transfer: %w", err)
+		// Transport-level failure: the rail may or may not have received the
+		// transfer. Leave the durable record in_flight — the TSQ sweeper
+		// resolves it (success or failed -> auto-reversal). Never blind-fail.
+		t.Detail = "dispatch uncertain: " + err.Error()
+		t.UpdatedAt = nowRFC3339()
+		s.put(t)
+		return t, nil
 	}
 	t.Status = res.Status
 	t.Detail = res.Detail
+	t.UpdatedAt = nowRFC3339()
 	if err := s.st.Put("nip_transfers", "idem:"+t.IdempotencyKey, t); err != nil {
-		return NIPTransfer{}, err
+		return t, fmt.Errorf("update transfer record: %w", err)
 	}
 	if err := s.st.Put("nip_transfers", t.SessionID, t); err != nil {
-		return NIPTransfer{}, err
+		return t, fmt.Errorf("update transfer record: %w", err)
 	}
 	s.publish(&t)
 	return t, nil
+}
+
+// payoutRequestHash binds an idempotency key to the payload it first
+// carried, so a key reused with different parameters is rejected instead of
+// silently returning an unrelated transfer.
+func payoutRequestHash(req PayoutRequest) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		req.Purpose, req.IdempotencyKey, fmt.Sprint(req.AmountKobo), req.DestAccount, req.DestBankCode, req.Narration,
+	}, "|")))
+	return fmt.Sprintf("%x", sum[:16])
 }
 
 // Refund sends value back for a SUCCESSFUL prior transfer. Per CBN rules a

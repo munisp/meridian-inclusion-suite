@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
@@ -71,10 +72,12 @@ func TestCommissionPayoutDedupPerPeriod(t *testing.T) {
 	}
 }
 
-// TestCommissionPayoutCrashReplay: crash after the post lands but before the
-// marker write commits is impossible (marker precedes post), but a crash
-// between the pending and the post leaves a voided-or-replayable pending;
-// re-running the period completes the payout exactly once.
+// TestCommissionPayoutCrashReplay: a crash between the post and the marker
+// write (post landed, marker missing) is now the only mid-saga crash window
+// (marker is written AFTER the post). Re-running the period replays the
+// deterministic post idempotently and writes the marker: exactly one payout.
+// The legacy fully-committed state (pending+post+marker) is also covered —
+// re-run must be a no-op.
 func TestCommissionPayoutCrashReplay(t *testing.T) {
 	st, err := store.Open("")
 	if err != nil {
@@ -120,5 +123,125 @@ func TestCommissionPayoutCrashReplay(t *testing.T) {
 	bal, _ := lc.Balance(acctID)
 	if bal.CreditsPosted != commissionPerVerifiedKobo {
 		t.Fatalf("crash replay must not double-pay, got %+v", bal)
+	}
+}
+
+var errLedgerOutage = errors.New("ledger: unavailable (injected outage)")
+
+// flakyPostClient wraps a DevClient and fails PostPendingAs while armed,
+// simulating a ledger outage mid-settlement.
+type flakyPostClient struct {
+	*ledger.DevClient
+	armed bool
+}
+
+func (c *flakyPostClient) PostPendingAs(pendingID, postID string, amount uint64) (string, error) {
+	if c.armed {
+		return "", errLedgerOutage
+	}
+	return c.DevClient.PostPendingAs(pendingID, postID, amount)
+}
+
+// TestCommissionPayoutPostFailureRetryable (audit funds-flow #2): a
+// PostPendingAs failure must NOT leave a paid marker — the pending is
+// voided, no marker exists, and a re-run pays the agent exactly once.
+func TestCommissionPayoutPostFailureRetryable(t *testing.T) {
+	st, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry(st)
+	lc := &flakyPostClient{DevClient: ledger.NewDevClient()}
+	wf := NewWorkflows(st, reg, NIMCSimulator{}, LocalTINProvisioner{}, NewConsentService(st), lc, events.NewInprocBus())
+	op := Operator{NINHash: NINHash("12345678901"), FullName: "Test Op", AgentID: "agent-5", CapturedAt: nowRFC3339()}
+	if err := reg.Create(&op); err != nil {
+		t.Fatal(err)
+	}
+	if run := wf.TINProvision(op.ID, "12345678901"); run.Status != "completed" {
+		t.Fatalf("provision: %s", run.Error)
+	}
+	acctID := ledger.AccountID(nsAgentCommission, hashSerial("agent-5"))
+
+	// ledger outage during the post: run fails, agent NOT marked paid
+	lc.armed = true
+	run := wf.CommissionSettlementForPeriod("2026-07")
+	if run.Status == "completed" {
+		t.Fatalf("settlement must fail when the post fails")
+	}
+	if wf.payoutMarked("agent-5", "2026-07") {
+		t.Fatalf("post failure must not leave a paid marker (agent would never be paid)")
+	}
+	bal, _ := lc.Balance(acctID)
+	if bal.CreditsPosted != 0 {
+		t.Fatalf("no money may move on a failed post, got %+v", bal)
+	}
+
+	// ledger recovers: re-run retries and pays exactly once
+	lc.armed = false
+	run2 := wf.CommissionSettlementForPeriod("2026-07")
+	if run2.Status != "completed" {
+		t.Fatalf("retry after post failure: %s", run2.Error)
+	}
+	bal2, _ := lc.Balance(acctID)
+	if bal2.CreditsPosted != commissionPerVerifiedKobo {
+		t.Fatalf("retry must pay exactly once, got %+v", bal2)
+	}
+	if !wf.payoutMarked("agent-5", "2026-07") {
+		t.Fatalf("marker must exist after a successful retry")
+	}
+}
+
+// TestCommissionPayoutCrashBetweenPostAndMark covers the remaining crash
+// window: post landed (deterministic id) but the process died before the
+// marker write. Re-run replays the post idempotently (no double-pay) and
+// writes the marker.
+func TestCommissionPayoutCrashBetweenPostAndMark(t *testing.T) {
+	st, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry(st)
+	lc := ledger.NewDevClient()
+	wf := NewWorkflows(st, reg, NIMCSimulator{}, LocalTINProvisioner{}, NewConsentService(st), lc, events.NewInprocBus())
+	op := Operator{NINHash: NINHash("12345678901"), FullName: "Test Op", AgentID: "agent-6", CapturedAt: nowRFC3339()}
+	if err := reg.Create(&op); err != nil {
+		t.Fatal(err)
+	}
+	if run := wf.TINProvision(op.ID, "12345678901"); run.Status != "completed" {
+		t.Fatalf("provision: %s", run.Error)
+	}
+	acctID := ledger.AccountID(nsAgentCommission, hashSerial("agent-6"))
+
+	// simulate the crash state: pending + post landed, NO marker
+	poolID, _ := wf.ensurePoolAccount()
+	if _, err := wf.ensureCommissionAccount("agent-6"); err != nil {
+		t.Fatal(err)
+	}
+	pendID := ledger.DeterministicTransferID("comm-pending:agent-6:2026-07")
+	postID := ledger.DeterministicTransferID("comm-post:agent-6:2026-07")
+	if _, err := lc.PendingTransfer(ledger.Transfer{
+		ID: pendID, DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
+		Code: ledger.CodeSettle, Amount: commissionPerVerifiedKobo, UserData: "commission:agent-6:2026-07",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lc.PostPendingAs(pendID, postID, commissionPerVerifiedKobo); err != nil {
+		t.Fatal(err)
+	}
+	if wf.payoutMarked("agent-6", "2026-07") {
+		t.Fatalf("test setup: marker must be absent (crash before mark)")
+	}
+
+	// --- restart: re-run the period ---
+	run := wf.CommissionSettlementForPeriod("2026-07")
+	if run.Status != "completed" {
+		t.Fatalf("re-run: %s", run.Error)
+	}
+	bal, _ := lc.Balance(acctID)
+	if bal.CreditsPosted != commissionPerVerifiedKobo {
+		t.Fatalf("crash between post and mark must not double-pay, got %+v", bal)
+	}
+	if !wf.payoutMarked("agent-6", "2026-07") {
+		t.Fatalf("re-run must write the marker after replaying the post")
 	}
 }
