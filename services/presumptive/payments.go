@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -22,27 +24,49 @@ const (
 // idempotencyTTL bounds how long an idempotency-key replay window stays open.
 const idempotencyTTL = 24 * time.Hour
 
+// ErrIdempotencyConflict is returned when an Idempotency-Key is replayed
+// with a different payload within the TTL window; the HTTP layer maps it to
+// 409 (same class as the NIP payout RequestHash conflict in nip_recon.go).
+var ErrIdempotencyConflict = errors.New("idempotency key already used with a different request payload")
+
 // IdempotencyRecord binds a caller-supplied Idempotency-Key to the payment
 // it created, so client retries replay the original response instead of
-// creating a second payment + second pending hold.
+// creating a second payment + second pending hold. RequestHash binds the key
+// to the exact request payload (audit w2 #4): a replay with a different
+// payload is rejected, never silently served the original payment.
 type IdempotencyRecord struct {
-	Key       string `json:"key"`
-	PaymentID string `json:"payment_id"`
-	CreatedAt string `json:"created_at"`
+	Key         string `json:"key"`
+	PaymentID   string `json:"payment_id"`
+	CreatedAt   string `json:"created_at"`
+	RequestHash string `json:"request_hash,omitempty"`
 }
 
 // lookupIdempotency returns the payment id previously created for key, if
-// the record exists and is younger than idempotencyTTL.
-func (s *PaymentService) lookupIdempotency(key string) (string, bool) {
+// the record exists and is younger than idempotencyTTL. A key replayed with
+// a different payload hash yields ErrIdempotencyConflict.
+func (s *PaymentService) lookupIdempotency(key, reqHash string) (string, error) {
 	var rec IdempotencyRecord
 	ok, err := s.st.Get("idempotency", key, &rec)
 	if err != nil || !ok {
-		return "", false
+		return "", nil
 	}
 	if ts, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil && time.Since(ts) > idempotencyTTL {
-		return "", false // expired: a fresh attempt is allowed
+		return "", nil // expired: a fresh attempt is allowed
 	}
-	return rec.PaymentID, true
+	if rec.RequestHash != "" && reqHash != "" && rec.RequestHash != reqHash {
+		return "", ErrIdempotencyConflict
+	}
+	return rec.PaymentID, nil
+}
+
+// intentRequestHash binds an idempotency key to the payload it first
+// carried (same pattern as payoutRequestHash in nip_recon.go).
+func intentRequestHash(in IntentRequest) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		in.TINHash, in.State, in.TradeCategory, fmt.Sprint(in.AnnualTurnoverKobo),
+		in.Period, in.Provider, fmt.Sprint(in.Monthly),
+	}, "|")))
+	return fmt.Sprintf("%x", sum[:16])
 }
 
 // PaymentService runs the payment lifecycle:
@@ -122,8 +146,14 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	if in.TINHash == "" || in.State == "" {
 		return Payment{}, fmt.Errorf("tin_hash and state are required")
 	}
+	reqHash := ""
 	if in.IdempotencyKey != "" {
-		if pid, ok := s.lookupIdempotency(in.IdempotencyKey); ok {
+		reqHash = intentRequestHash(in)
+		pid, err := s.lookupIdempotency(in.IdempotencyKey, reqHash)
+		if err != nil {
+			return Payment{}, err // ErrIdempotencyConflict -> 409
+		}
+		if pid != "" {
 			p, found, err := s.get(pid)
 			if err == nil && found {
 				return p, nil // idempotent replay (200)
@@ -197,7 +227,7 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	}
 	if in.IdempotencyKey != "" {
 		_ = s.st.Put("idempotency", in.IdempotencyKey, IdempotencyRecord{
-			Key: in.IdempotencyKey, PaymentID: p.ID, CreatedAt: nowRFC3339(),
+			Key: in.IdempotencyKey, PaymentID: p.ID, CreatedAt: nowRFC3339(), RequestHash: reqHash,
 		})
 	}
 	s.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{

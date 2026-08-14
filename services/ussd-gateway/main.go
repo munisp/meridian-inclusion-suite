@@ -53,10 +53,17 @@ func main() {
 		port = "8104"
 	}
 	// M-6/M-7: bounded bodies + origin-scoped CORS wrap the whole chain.
-	handler := httpx.MaxBody(httpx.CORS(httpx.Auth(func(p string) bool {
-		return p == "/healthz" || p == "/readyz" || p == "/webhook/ussd" || p == "/v1/simulate"
-	})(srv.routes())))
+	handler := httpx.MaxBody(httpx.CORS(httpx.Auth(publicPath)(srv.routes())))
 	log.Printf("ussd-gateway %s listening on :%s (service_code=%s ttl=%ds menus=%d)",
 		serviceVersion, port, graph.ServiceCode, graph.SessionTTLSeconds, len(graph.Menus))
 	log.Fatal(http.ListenAndServe(":"+port, handler))
+}
+
+// publicPath lists routes exempt from httpx.Auth. F-3: /v1/simulate is a
+// dev/test convenience that drives the real menu engine + action bus — it is
+// never auth-exempt in prod (and the handler itself 404s there, see
+// handlers.go), so an unauthenticated prod caller gets 401.
+func publicPath(p string) bool {
+	return p == "/healthz" || p == "/readyz" || p == "/webhook/ussd" ||
+		(p == "/v1/simulate" && !keyx.Prod())
 }

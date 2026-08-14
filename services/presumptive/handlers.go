@@ -174,6 +174,9 @@ func (s *server) createIntent(w http.ResponseWriter, r *http.Request) {
 		if err == ErrGateClosed {
 			status = http.StatusForbidden
 		}
+		if errors.Is(err, ErrIdempotencyConflict) {
+			status = http.StatusConflict
+		}
 		httpx.WriteProblem(w, status, "intent_rejected", err.Error())
 		return
 	}

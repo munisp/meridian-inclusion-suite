@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -86,6 +87,38 @@ func TestCreateIntentIdempotencyKey(t *testing.T) {
 	bal, _ := ts.lc.Balance(ledger.AccountID(nsPSMCollections, 1))
 	if bal.CreditsPending != p1.AmountKobo {
 		t.Fatalf("exactly one pending hold expected, got %d", bal.CreditsPending)
+	}
+}
+
+// TestCreateIntentIdempotencyPayloadConflict: the same Idempotency-Key
+// replayed with a different payload (audit w2 #4: amount/turnover change
+// previously returned the original payment silently) is rejected with
+// ErrIdempotencyConflict (HTTP 409), and no second payment/hold is created.
+func TestCreateIntentIdempotencyPayloadConflict(t *testing.T) {
+	ts := newPSMTestStack(t)
+	base := IntentRequest{
+		TINHash: "tinhash-conflict", State: "Lagos", TradeCategory: "retail",
+		AnnualTurnoverKobo: 300000000, Provider: "remita", Period: "2026",
+		IdempotencyKey: "key-conflict",
+	}
+	p1, err := ts.pay.CreateIntent(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := base
+	changed.AnnualTurnoverKobo = 400000000 // different payload, same key
+	_, err = ts.pay.CreateIntent(changed)
+	if !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("expected ErrIdempotencyConflict, got %v", err)
+	}
+	// identical replay still returns the original payment
+	p2, err := ts.pay.CreateIntent(base)
+	if err != nil || p2.ID != p1.ID {
+		t.Fatalf("same-payload replay must succeed: p2=%+v err=%v", p2, err)
+	}
+	var all []Payment
+	if err := ts.st.List("payments", &all); err != nil || len(all) != 1 {
+		t.Fatalf("exactly one payment must exist, got %d err=%v", len(all), err)
 	}
 }
 
