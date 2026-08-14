@@ -12,6 +12,7 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
@@ -275,6 +276,13 @@ func itoa(n int) string {
 // simulate runs a full session from a list of inputs — the built-in
 // simulator for testing a full session via curl.
 func (s *server) simulate(w http.ResponseWriter, r *http.Request) {
+	// F-3: fail closed in prod — the simulator drives the real menu engine and
+	// action bus (menu/action enumeration + bus events). Even an authenticated
+	// prod caller gets 404; see publicPath in main.go for the auth gate.
+	if keyx.Prod() {
+		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "unknown route")
+		return
+	}
 	var in struct {
 		Phone  string   `json:"phone"`
 		Inputs []string `json:"inputs"`
