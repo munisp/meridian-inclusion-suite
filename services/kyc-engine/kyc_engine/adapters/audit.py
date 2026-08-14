@@ -32,16 +32,23 @@ def compute_hash(prev_hash: str, event_type: str, payload: dict, ts: str) -> str
     return h.hexdigest()
 
 
-def emit(case_id: str, event_type: str, payload: dict, session=None) -> AuditEvent:
-    """Append a hash-chained evidence event to the outbox."""
+def emit(case_id: str, event_type: str, payload: dict, session=None,
+         prev_hash: str | None = None) -> AuditEvent:
+    """Append a hash-chained evidence event to the outbox.
+
+    prev_hash lets batch callers (e.g. monitoring.rescreen_due, F-10) supply
+    a prefetched chain head instead of one SELECT per event."""
     own = session is None
     sess = session or get_session()
     try:
-        last = sess.execute(
-            select(AuditEvent).where(AuditEvent.case_id == case_id)
-            .order_by(AuditEvent.created_at.desc())
-        ).scalars().first()
-        prev = last.hash if last else GENESIS
+        if prev_hash is not None:
+            prev = prev_hash
+        else:
+            last = sess.execute(
+                select(AuditEvent).where(AuditEvent.case_id == case_id)
+                .order_by(AuditEvent.created_at.desc())
+            ).scalars().first()
+            prev = last.hash if last else GENESIS
         ts = datetime.now(timezone.utc).isoformat()
         ev = AuditEvent(
             case_id=case_id, event_type=event_type, payload=payload,
