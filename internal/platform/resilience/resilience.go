@@ -1,13 +1,28 @@
 // Package resilience implements the shared H4 resilience policy for external
-// adapters: 3-retry exponential backoff + circuit breaker
+// adapters: 3-retry exponential backoff with full jitter + circuit breaker
 // (5 consecutive failures → open for 30s, half-open probe afterwards).
 package resilience
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"sync"
 	"time"
 )
+
+// randDuration returns a uniform random duration in [0, max) using
+// crypto/rand (no seeding concerns, safe for concurrent use).
+func randDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return max / 2
+	}
+	return time.Duration(binary.LittleEndian.Uint64(b[:]) % uint64(max))
+}
 
 // ErrCircuitOpen is returned when the breaker is open and the call is
 // short-circuited.
@@ -84,18 +99,23 @@ func (b *Breaker) Do(fn func() error) error {
 }
 
 // Retry executes fn up to attempts times (default 3) with exponential
-// backoff (200ms, 400ms, 800ms...) between attempts. Each attempt is
-// breaker-guarded. Returns the last error.
+// backoff and full jitter (sleep = rand(0, min(cap, base*2^i))) between
+// attempts, avoiding lockstep retries across replicas (F-8). Each attempt
+// is breaker-guarded. Returns the last error.
 func (b *Breaker) Retry(attempts int, fn func() error) error {
 	if attempts <= 0 {
 		attempts = 3
 	}
+	const base = 200 * time.Millisecond
+	const cap = 5 * time.Second
 	var err error
-	backoff := 200 * time.Millisecond
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
-			time.Sleep(backoff)
-			backoff *= 2
+			backoff := base << (i - 1)
+			if backoff > cap {
+				backoff = cap
+			}
+			time.Sleep(randDuration(backoff))
 		}
 		err = b.Do(fn)
 		if err == nil {
