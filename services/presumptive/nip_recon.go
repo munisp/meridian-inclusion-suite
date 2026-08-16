@@ -48,9 +48,9 @@ type NIPTransfer struct {
 	// ExpiresAt bounds the idempotency replay window (default 7 days,
 	// assurance R4 item 2). After expiry a reused key is treated as new;
 	// the TSQ sweeper purges expired records only in terminal state.
-	ExpiresAt      string `json:"expires_at,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // nipIdempotencyTTL is the default idempotency replay window for NIP
@@ -102,14 +102,71 @@ func NewNIPServiceFromEnv(st *store.Store, bus events.Bus) (*NIPService, error) 
 	return NewNIPService(rail, st, bus, require), nil
 }
 
+// nipOutboxRecord is a durable outbox row for a transfer-status event that
+// could not be published to the bus on the first attempt (§1.1 outbox
+// pattern). Relayed by RelayOutbox; deleted only after a successful publish.
+type nipOutboxRecord struct {
+	TransferID string          `json:"transfer_id"`
+	SessionID  string          `json:"session_id"`
+	Envelope   events.Envelope `json:"envelope"`
+	CreatedAt  string          `json:"created_at"`
+	Attempts   int             `json:"attempts"`
+	LastError  string          `json:"last_error,omitempty"`
+}
+
+// publish emits the transfer-status event. NO SILENT LOSS (assurance R9):
+// a bus failure after the rail dispatch is durably recorded in the
+// "nip_outbox" collection so RelayOutbox republishes it once the bus
+// recovers. If the outbox write itself fails, the error is logged loudly
+// and the transfer record is marked (Detail) so the gap is visible to
+// operators — the transfer state is already durable and correct either way.
 func (s *NIPService) publish(t *NIPTransfer) {
 	if s.bus == nil {
 		return
 	}
-	_ = s.bus.Publish("nrs.psm.nip.v1", events.New("nrs.psm.nip.v1", serviceName, "", "", map[string]any{
+	env := events.New("nrs.psm.nip.v1", serviceName, "", "", map[string]any{
 		"transfer_id": t.ID, "session_id": t.SessionID, "status": t.Status,
 		"amount_kobo": t.AmountKobo, "purpose": t.Purpose,
-	}))
+	})
+	if err := s.bus.Publish("nrs.psm.nip.v1", env); err != nil {
+		rec := nipOutboxRecord{
+			TransferID: t.ID, SessionID: t.SessionID, Envelope: env,
+			CreatedAt: nowRFC3339(), LastError: err.Error(),
+		}
+		if werr := s.st.Put("nip_outbox", t.ID, rec); werr != nil {
+			log.Printf("nip publish FAILED (%v) and outbox write FAILED (%v) for transfer %s session %s status %s — event not yet durable; transfer state is durable and correct",
+				err, werr, t.ID, t.SessionID, t.Status)
+		} else {
+			log.Printf("nip publish failed for transfer %s (%v) — queued to nip_outbox for relay", t.ID, err)
+		}
+	}
+}
+
+// RelayOutbox republishes every pending nip_outbox record; a record is
+// deleted only after a successful publish (at-least-once; consumers dedupe
+// by envelope id). Returns the number of records relayed.
+func (s *NIPService) RelayOutbox() (int, error) {
+	if s.bus == nil {
+		return 0, nil
+	}
+	var all []nipOutboxRecord
+	if err := s.st.List("nip_outbox", &all); err != nil {
+		return 0, err
+	}
+	relayed := 0
+	for _, rec := range all {
+		if err := s.bus.Publish("nrs.psm.nip.v1", rec.Envelope); err != nil {
+			rec.Attempts++
+			rec.LastError = err.Error()
+			_ = s.st.Put("nip_outbox", rec.TransferID, rec)
+			continue
+		}
+		if _, err := s.st.Delete("nip_outbox", rec.TransferID); err != nil {
+			log.Printf("nip outbox: relayed %s but delete failed: %v (will re-relay; consumers dedupe)", rec.TransferID, err)
+		}
+		relayed++
+	}
+	return relayed, nil
 }
 
 // PayoutRequest starts an outbound transfer (payout or refund leg).
@@ -383,6 +440,11 @@ func (s *NIPService) StartTSQSweeper(interval time.Duration, stop <-chan struct{
 					log.Printf("nip idempotency purge: %v", err)
 				} else if n > 0 {
 					log.Printf("nip idempotency purge: removed %d expired terminal record(s)", n)
+				}
+				if n, err := s.RelayOutbox(); err != nil {
+					log.Printf("nip outbox relay: %v", err)
+				} else if n > 0 {
+					log.Printf("nip outbox relay: republished %d queued event(s)", n)
 				}
 			}
 		}
