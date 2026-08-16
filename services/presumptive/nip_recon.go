@@ -142,7 +142,13 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	// rail). An in_flight record is returned as-is (the TSQ sweeper resolves
 	// it); the client must NOT trigger a second rail dispatch.
 	var existing NIPTransfer
-	if ok, _ := s.st.Get("nip_transfers", "idem:"+req.IdempotencyKey, &existing); ok {
+	found, lookupErr := s.st.Get("nip_transfers", "idem:"+req.IdempotencyKey, &existing)
+	if lookupErr != nil {
+		// R7 fail-closed: a db read fault on the idempotency lookup must
+		// abort the payout — proceeding could double-dispatch a reused key.
+		return NIPTransfer{}, fmt.Errorf("idempotency lookup: %w", lookupErr)
+	}
+	if found {
 		if nipTransferExpired(existing, time.Now()) {
 			// expired key: treated as new — fall through to a fresh transfer
 			// (the old record is overwritten on Put below).
