@@ -66,7 +66,13 @@ func (rec IdempotencyRecord) recordExpired(now time.Time) bool {
 func (s *PaymentService) lookupIdempotency(key, reqHash string) (string, error) {
 	var rec IdempotencyRecord
 	ok, err := s.st.Get("idempotency", key, &rec)
-	if err != nil || !ok {
+	if err != nil {
+		// R7 fail-closed: a db read fault on the idempotency lookup must
+		// abort the intent — proceeding on a failed read could create a
+		// second payment + second pending hold for a reused key.
+		return "", fmt.Errorf("idempotency lookup: %w", err)
+	}
+	if !ok {
 		return "", nil
 	}
 	if rec.recordExpired(time.Now()) {

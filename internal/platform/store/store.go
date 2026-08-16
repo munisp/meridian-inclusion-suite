@@ -17,6 +17,29 @@ type Store struct {
 	path string
 	data map[string]map[string]json.RawMessage
 	pool *pgxpool.Pool // non-nil => Postgres backend (DATABASE_URL, see pg.go)
+
+	// faultHook, when non-nil (tests only), is consulted before each op; a
+	// non-nil return simulates a database fault (timeout, deadlock) and the
+	// op is refused WITHOUT mutating state (assurance R7 §6.3 db-fault
+	// cells). op is one of "put"|"get"|"delete"|"list".
+	faultHook func(op, coll, id string) error
+}
+
+// SetFaultHook installs a test-only fault-injection hook; nil clears it.
+func (s *Store) SetFaultHook(h func(op, coll, id string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faultHook = h
+}
+
+func (s *Store) fault(op, coll, id string) error {
+	s.mu.RLock()
+	h := s.faultHook
+	s.mu.RUnlock()
+	if h == nil {
+		return nil
+	}
+	return h(op, coll, id)
 }
 
 // Open loads (or creates) a JSON file store. path "" => in-memory only.
@@ -62,6 +85,9 @@ func (s *Store) persistLocked() error {
 }
 
 func (s *Store) Put(coll, id string, v any) error {
+	if err := s.fault("put", coll, id); err != nil {
+		return err
+	}
 	if s.pool != nil {
 		return s.pgPut(coll, id, v)
 	}
@@ -79,6 +105,9 @@ func (s *Store) Put(coll, id string, v any) error {
 }
 
 func (s *Store) Get(coll, id string, v any) (bool, error) {
+	if err := s.fault("get", coll, id); err != nil {
+		return false, err
+	}
 	if s.pool != nil {
 		return s.pgGet(coll, id, v)
 	}
@@ -93,6 +122,9 @@ func (s *Store) Get(coll, id string, v any) (bool, error) {
 
 // Delete removes a record; returns false if absent.
 func (s *Store) Delete(coll, id string) (bool, error) {
+	if err := s.fault("delete", coll, id); err != nil {
+		return false, err
+	}
 	if s.pool != nil {
 		return s.pgDelete(coll, id)
 	}
@@ -108,6 +140,9 @@ func (s *Store) Delete(coll, id string) (bool, error) {
 // List decodes every record in a collection into out, which must be a
 // pointer to a slice of the element type.
 func (s *Store) List(coll string, out any) error {
+	if err := s.fault("list", coll, ""); err != nil {
+		return err
+	}
 	if s.pool != nil {
 		return s.pgList(coll, out)
 	}
