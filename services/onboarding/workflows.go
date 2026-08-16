@@ -421,12 +421,21 @@ func payoutExpired(p CommissionPayout, now time.Time) bool {
 // (agentID, period). An expired marker is treated as absent so a reused
 // period key starts a fresh attempt (mirrors the PSM idempotency TTL).
 func (w *Workflows) payoutMarked(agentID, period string) bool {
+	_, marked := w.payoutMarker(agentID, period)
+	return marked
+}
+
+// payoutMarker returns the live marker for (agentID, period), if any.
+func (w *Workflows) payoutMarker(agentID, period string) (CommissionPayout, bool) {
 	var p CommissionPayout
 	ok, err := w.st.Get("commission_payouts", payoutKey(agentID, period), &p)
 	if err != nil || !ok {
-		return false
+		return CommissionPayout{}, false
 	}
-	return !payoutExpired(p, time.Now())
+	if payoutExpired(p, time.Now()) {
+		return CommissionPayout{}, false
+	}
+	return p, true
 }
 
 // PurgeExpiredCommissionPayouts deletes expired payout markers. Markers are
@@ -536,11 +545,25 @@ func (w *Workflows) commissionSettlement(period string) (any, error) {
 		}
 	}
 	settled := map[string]uint64{}
+	var conflicts []map[string]any
 	var total uint64
 	for agentID, n := range perAgent {
 		amount := uint64(n) * commissionPerVerifiedKobo
 		total += amount
-		if w.payoutMarked(agentID, period) {
+		if marker, marked := w.payoutMarker(agentID, period); marked {
+			if marker.AmountKobo != amount {
+				// R7 payload binding (w2: amount unbound in the marker):
+				// the same (agent, period) key replayed with a DIFFERENT
+				// computed amount surfaces a conflict — never a silent
+				// replay claiming the new amount was settled.
+				conflicts = append(conflicts, map[string]any{
+					"agent_id": agentID, "period": period,
+					"paid_kobo": marker.AmountKobo, "computed_kobo": amount,
+					"transfer_id": marker.TransferID,
+					"error":       "payout marker amount conflict: manual reconciliation required",
+				})
+				continue
+			}
 			settled[agentID] = amount // already paid this period — no-op
 			continue
 		}
@@ -597,7 +620,11 @@ func (w *Workflows) commissionSettlement(period string) (any, error) {
 	w.bus.Publish("nrs.onb.commission.settled.v1", events.New("nrs.onb.commission.settled.v1", serviceName, "", "", map[string]any{
 		"settled": settled, "total_kobo": total, "period": period,
 	}))
-	return map[string]any{"settled": settled, "total_kobo": total, "ledger": ledger.LedgerCommissions, "period": period}, nil
+	out := map[string]any{"settled": settled, "total_kobo": total, "ledger": ledger.LedgerCommissions, "period": period}
+	if len(conflicts) > 0 {
+		out["conflicts"] = conflicts
+	}
+	return out, nil
 }
 
 // FilingReminders (wf-onb-filing-reminders): queue reminders for provisioned
