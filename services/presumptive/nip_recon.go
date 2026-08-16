@@ -45,8 +45,31 @@ type NIPTransfer struct {
 	// RequestHash binds the idempotency key to the exact request payload;
 	// a retry with the same key but a different payload is rejected.
 	RequestHash string `json:"request_hash,omitempty"`
+	// ExpiresAt bounds the idempotency replay window (default 7 days,
+	// assurance R4 item 2). After expiry a reused key is treated as new;
+	// the TSQ sweeper purges expired records only in terminal state.
+	ExpiresAt      string `json:"expires_at,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
+}
+
+// nipIdempotencyTTL is the default idempotency replay window for NIP
+// payout/refund keys (financial safety margin over the 24h PSM intent).
+const nipIdempotencyTTL = 7 * 24 * time.Hour
+
+// nipTransferExpired reports whether t's idempotency window has closed.
+func nipTransferExpired(t NIPTransfer, now time.Time) bool {
+	exp := t.ExpiresAt
+	if exp == "" {
+		if ts, err := time.Parse(time.RFC3339, t.CreatedAt); err == nil {
+			exp = ts.Add(nipIdempotencyTTL).Format(time.RFC3339)
+		}
+	}
+	if exp == "" {
+		return false
+	}
+	deadline, err := time.Parse(time.RFC3339, exp)
+	return err == nil && now.After(deadline)
 }
 
 // NIPService runs outbound transfers over the NIP rail with the mandatory
@@ -120,10 +143,15 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	// it); the client must NOT trigger a second rail dispatch.
 	var existing NIPTransfer
 	if ok, _ := s.st.Get("nip_transfers", "idem:"+req.IdempotencyKey, &existing); ok {
-		if existing.RequestHash != "" && existing.RequestHash != reqHash {
-			return NIPTransfer{}, fmt.Errorf("idempotency_key %q already used with a different request", tail4(req.IdempotencyKey))
+		if nipTransferExpired(existing, time.Now()) {
+			// expired key: treated as new — fall through to a fresh transfer
+			// (the old record is overwritten on Put below).
+		} else {
+			if existing.RequestHash != "" && existing.RequestHash != reqHash {
+				return NIPTransfer{}, fmt.Errorf("idempotency_key %q already used with a different request", tail4(req.IdempotencyKey))
+			}
+			return existing, nil
 		}
-		return existing, nil
 	}
 
 	t := NIPTransfer{
@@ -134,6 +162,7 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 		DestAccount:    req.DestAccount,
 		DestBankCode:   req.DestBankCode,
 		Narration:      req.Narration,
+		ExpiresAt:      time.Now().Add(nipIdempotencyTTL).UTC().Format(time.RFC3339),
 		CreatedAt:      nowRFC3339(),
 		UpdatedAt:      nowRFC3339(),
 	}
@@ -296,6 +325,35 @@ func (s *NIPService) SweepTSQ() (int, error) {
 	return resolved, nil
 }
 
+// PurgeExpiredIdempotency removes expired idempotency records
+// ("idem:"+key entries) whose transfer reached a terminal state
+// (success|failed|reversed). Expired in_flight records are retained so the
+// TSQ sweeper can still resolve them and a late retry still dedupes.
+// Returns the number of records purged.
+func (s *NIPService) PurgeExpiredIdempotency() (int, error) {
+	var all []NIPTransfer
+	if err := s.st.List("nip_transfers", &all); err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	purged := 0
+	for _, t := range all {
+		if t.IdempotencyKey == "" || !nipTransferExpired(t, now) {
+			continue
+		}
+		switch t.Status {
+		case NIPStatusSuccess, NIPStatusFailed, NIPStatusReversed:
+		default:
+			continue // in_flight: retained for TSQ resolution
+		}
+		if err := s.st.Delete("nip_transfers", "idem:"+t.IdempotencyKey); err != nil {
+			return purged, err
+		}
+		purged++
+	}
+	return purged, nil
+}
+
 // StartTSQSweeper runs SweepTSQ on an interval until stop is closed (wired
 // from main alongside the other recovery loops).
 func (s *NIPService) StartTSQSweeper(interval time.Duration, stop <-chan struct{}) {
@@ -314,6 +372,11 @@ func (s *NIPService) StartTSQSweeper(interval time.Duration, stop <-chan struct{
 					log.Printf("nip tsq sweeper: %v", err)
 				} else if n > 0 {
 					log.Printf("nip tsq sweeper: resolved %d in-flight transfer(s)", n)
+				}
+				if n, err := s.PurgeExpiredIdempotency(); err != nil {
+					log.Printf("nip idempotency purge: %v", err)
+				} else if n > 0 {
+					log.Printf("nip idempotency purge: removed %d expired terminal record(s)", n)
 				}
 			}
 		}
