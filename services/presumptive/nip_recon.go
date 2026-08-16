@@ -346,7 +346,7 @@ func (s *NIPService) PurgeExpiredIdempotency() (int, error) {
 		default:
 			continue // in_flight: retained for TSQ resolution
 		}
-		if err := s.st.Delete("nip_transfers", "idem:"+t.IdempotencyKey); err != nil {
+		if _, err := s.st.Delete("nip_transfers", "idem:"+t.IdempotencyKey); err != nil {
 			return purged, err
 		}
 		purged++

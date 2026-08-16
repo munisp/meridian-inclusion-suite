@@ -105,7 +105,7 @@ func (s *PaymentService) PurgeExpiredIdempotency() (int, error) {
 		if !terminal {
 			continue
 		}
-		if err := s.st.Delete("idempotency", rec.Key); err != nil {
+		if _, err := s.st.Delete("idempotency", rec.Key); err != nil {
 			return purged, err
 		}
 		purged++
