@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
@@ -243,5 +244,80 @@ func TestCommissionPayoutCrashBetweenPostAndMark(t *testing.T) {
 	}
 	if !wf.payoutMarked("agent-6", "2026-07") {
 		t.Fatalf("re-run must write the marker after replaying the post")
+	}
+}
+
+// TestCommissionPayoutExpiredTreatedAsNew proves the R4 idempotency TTL: a
+// payout marker older than commissionPayoutTTL no longer suppresses a
+// settlement re-run for that period (expired key treated as new).
+func TestCommissionPayoutExpiredTreatedAsNew(t *testing.T) {
+	st, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry(st)
+	lc := ledger.NewDevClient()
+	wf := NewWorkflows(st, reg, NIMCSimulator{}, LocalTINProvisioner{}, NewConsentService(st), lc, events.NewInprocBus())
+
+	// fresh marker: dedup active
+	if err := wf.markPayout("agent-x", "2026-01", 100, "tx-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !wf.payoutMarked("agent-x", "2026-01") {
+		t.Fatal("fresh marker must suppress re-run")
+	}
+
+	// backdate the marker beyond the TTL: dedup lapsed
+	old := time.Now().Add(-2 * commissionPayoutTTL).UTC().Format(time.RFC3339)
+	if err := st.Put("commission_payouts", payoutKey("agent-x", "2026-01"), CommissionPayout{
+		AgentID: "agent-x", Period: "2026-01", AmountKobo: 100, TransferID: "tx-1", PaidAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if wf.payoutMarked("agent-x", "2026-01") {
+		t.Fatal("expired marker must be treated as absent")
+	}
+}
+
+// TestCommissionPayoutPurgeExpired proves the purge removes only expired,
+// terminal markers (TransferID recorded) and retains fresh or
+// partially-written records.
+func TestCommissionPayoutPurgeExpired(t *testing.T) {
+	st, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry(st)
+	lc := ledger.NewDevClient()
+	wf := NewWorkflows(st, reg, NIMCSimulator{}, LocalTINProvisioner{}, NewConsentService(st), lc, events.NewInprocBus())
+
+	old := time.Now().Add(-2 * commissionPayoutTTL).UTC().Format(time.RFC3339)
+	put := func(p CommissionPayout) {
+		if err := st.Put("commission_payouts", payoutKey(p.AgentID, p.Period), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(CommissionPayout{AgentID: "a1", Period: "2026-01", AmountKobo: 1, TransferID: "tx", PaidAt: old})              // expired, terminal -> purge
+	put(CommissionPayout{AgentID: "a2", Period: "2026-01", AmountKobo: 1, TransferID: "", PaidAt: old})                // expired, non-terminal -> keep
+	put(CommissionPayout{AgentID: "a3", Period: "2026-01", AmountKobo: 1, TransferID: "tx", PaidAt: nowRFC3339()})     // fresh -> keep
+
+	n, err := wf.PurgeExpiredCommissionPayouts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 purged, got %d", n)
+	}
+	var remaining []CommissionPayout
+	if err := st.List("commission_payouts", &remaining); err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("expected 2 retained, got %d", len(remaining))
+	}
+	for _, p := range remaining {
+		if p.AgentID == "a1" {
+			t.Fatal("expired terminal marker must be purged")
+		}
 	}
 }
