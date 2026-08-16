@@ -123,6 +123,14 @@ class AuditEvent(Base):
     prev_hash: Mapped[str] = mapped_column(String(64), default="")
     hash: Mapped[str] = mapped_column(String(64), default="")
     published: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Assurance R4 audit-event schema fields (all nullable/additive):
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    op_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approval_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    code_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     __table_args__ = (

@@ -22,7 +22,9 @@ const (
 )
 
 // idempotencyTTL bounds how long an idempotency-key replay window stays open.
-const idempotencyTTL = 24 * time.Hour
+// Default 7 days: a financial safety margin over the 24h PSM intent lifetime
+// (assurance R4 item 2).
+const idempotencyTTL = 7 * 24 * time.Hour
 
 // ErrIdempotencyConflict is returned when an Idempotency-Key is replayed
 // with a different payload within the TTL window; the HTTP layer maps it to
@@ -38,25 +40,77 @@ type IdempotencyRecord struct {
 	Key         string `json:"key"`
 	PaymentID   string `json:"payment_id"`
 	CreatedAt   string `json:"created_at"`
+	// ExpiresAt is the explicit TTL deadline (CreatedAt + idempotencyTTL).
+	// Records written before this field existed fall back to CreatedAt+TTL.
+	ExpiresAt   string `json:"expires_at,omitempty"`
 	RequestHash string `json:"request_hash,omitempty"`
+}
+
+// recordExpired reports whether the record's replay window has closed.
+func (rec IdempotencyRecord) recordExpired(now time.Time) bool {
+	if rec.ExpiresAt != "" {
+		if exp, err := time.Parse(time.RFC3339, rec.ExpiresAt); err == nil {
+			return now.After(exp)
+		}
+	}
+	if ts, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil {
+		return now.Sub(ts) > idempotencyTTL
+	}
+	return false
 }
 
 // lookupIdempotency returns the payment id previously created for key, if
 // the record exists and is younger than idempotencyTTL. A key replayed with
-// a different payload hash yields ErrIdempotencyConflict.
+// a different payload hash yields ErrIdempotencyConflict. An expired record
+// is treated as absent: the reused key starts a fresh attempt.
 func (s *PaymentService) lookupIdempotency(key, reqHash string) (string, error) {
 	var rec IdempotencyRecord
 	ok, err := s.st.Get("idempotency", key, &rec)
 	if err != nil || !ok {
 		return "", nil
 	}
-	if ts, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil && time.Since(ts) > idempotencyTTL {
+	if rec.recordExpired(time.Now()) {
 		return "", nil // expired: a fresh attempt is allowed
 	}
 	if rec.RequestHash != "" && reqHash != "" && rec.RequestHash != reqHash {
 		return "", ErrIdempotencyConflict
 	}
 	return rec.PaymentID, nil
+}
+
+// PurgeExpiredIdempotency deletes expired idempotency records whose payment
+// is in a terminal state (captured/voided/failed). Records for payments that
+// are still in flight are retained regardless of expiry so a late retry can
+// still resolve to the original payment. Returns the number purged.
+func (s *PaymentService) PurgeExpiredIdempotency() (int, error) {
+	var recs []IdempotencyRecord
+	if err := s.st.List("idempotency", &recs); err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	purged := 0
+	for _, rec := range recs {
+		if !rec.recordExpired(now) {
+			continue
+		}
+		terminal := true
+		var p Payment
+		if ok, err := s.st.Get("payments", rec.PaymentID, &p); err == nil && ok {
+			switch p.Status {
+			case "captured", "voided", "failed", "compensated":
+			default:
+				terminal = false
+			}
+		}
+		if !terminal {
+			continue
+		}
+		if _, err := s.st.Delete("idempotency", rec.Key); err != nil {
+			return purged, err
+		}
+		purged++
+	}
+	return purged, nil
 }
 
 // intentRequestHash binds an idempotency key to the payload it first
@@ -228,6 +282,7 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	if in.IdempotencyKey != "" {
 		_ = s.st.Put("idempotency", in.IdempotencyKey, IdempotencyRecord{
 			Key: in.IdempotencyKey, PaymentID: p.ID, CreatedAt: nowRFC3339(), RequestHash: reqHash,
+			ExpiresAt: time.Now().Add(idempotencyTTL).UTC().Format(time.RFC3339),
 		})
 	}
 	s.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{

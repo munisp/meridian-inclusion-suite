@@ -1,7 +1,7 @@
 """kyc-engine FastAPI app (SPEC A §2). All routes under /v1 except ops."""
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
@@ -56,7 +56,8 @@ def metrics():
 @app.post("/v1/cases", response_model=CreateCaseResponse, status_code=201,
           dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
 def create_case(req: CreateCaseRequest,
-                principal: Principal = Depends(current_principal)):
+                principal: Principal = Depends(current_principal),
+                x_trace_id: str | None = Header(None)):
     sess = get_session()
     try:
         case = KycCase(subject_type=req.subject_type, channel=req.channel,
@@ -66,7 +67,9 @@ def create_case(req: CreateCaseRequest,
         sess.commit()
         sess.refresh(case)
         audit.emit(case.id, "kyc.case.created.v1",
-                   {"subject_type": req.subject_type, "channel": req.channel}, session=sess)
+                   {"subject_type": req.subject_type, "channel": req.channel},
+                   session=sess, trace_id=x_trace_id,
+                   actor_role=principal.roles[0] if principal.roles else None)
         sess.commit()
         return CreateCaseResponse(
             case_id=case.id, status=case.status,
@@ -79,7 +82,8 @@ def create_case(req: CreateCaseRequest,
          dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
 async def upload_document(case_id: str, file: UploadFile = File(...),
                           doc_type: str = Form("unknown"),
-                          principal: Principal = Depends(current_principal)):
+                          principal: Principal = Depends(current_principal),
+                          x_trace_id: str | None = Header(None)):
     sess = get_session()
     try:
         case = sess.get(KycCase, case_id)
@@ -100,7 +104,8 @@ async def upload_document(case_id: str, file: UploadFile = File(...),
         sess.commit()
         audit.emit(case_id, "kyc.document.ingested.v1",
                    {"document_id": doc.id, "sha256": digest, "doc_type": doc_type},
-                   session=sess)
+                   session=sess, trace_id=x_trace_id,
+                   actor_role=principal.roles[0] if principal.roles else None)
         sess.commit()
         return {"document_id": doc.id, "sha256": digest}
     finally:
@@ -152,7 +157,8 @@ def get_case(case_id: str, principal: Principal = Depends(current_principal)):
 @app.post("/v1/cases/{case_id}/liveness/session", response_model=LivenessSessionOut,
           dependencies=[Depends(require_role(ROLE_AGENT, ROLE_ADMIN))])
 def create_liveness_session(case_id: str,
-                            principal: Principal = Depends(current_principal)):
+                            principal: Principal = Depends(current_principal),
+                            x_trace_id: str | None = Header(None)):
     sess = get_session()
     try:
         case = sess.get(KycCase, case_id)
@@ -167,7 +173,9 @@ def create_liveness_session(case_id: str,
         sess.refresh(ls)
         liveness_ws.open_session(ls.id, case_id, challenges)
         audit.emit(case_id, "kyc.liveness.session.v1",
-                   {"session_id": ls.id, "challenges": challenges}, session=sess)
+                   {"session_id": ls.id, "challenges": challenges},
+                   session=sess, trace_id=x_trace_id,
+                   actor_role=principal.roles[0] if principal.roles else None)
         sess.commit()
         return LivenessSessionOut(session_id=ls.id,
                                   ws_url=f"/liveness/{ls.id}",

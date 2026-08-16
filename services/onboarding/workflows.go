@@ -391,14 +391,65 @@ type CommissionPayout struct {
 	AmountKobo uint64 `json:"amount_kobo"`
 	TransferID string `json:"transfer_id"`
 	PaidAt     string `json:"paid_at"`
+	// ExpiresAt bounds the dedup replay window (PaidAt +
+	// commissionPayoutTTL). Records written before this field existed fall
+	// back to PaidAt+TTL.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
+
+// commissionPayoutTTL bounds how long a per-(agent, period) payout marker
+// stays authoritative for dedup (assurance R4 idempotency TTL item). After
+// it lapses the marker is treated as absent (and becomes purge-eligible).
+const commissionPayoutTTL = 7 * 24 * time.Hour
 
 func payoutKey(agentID, period string) string { return agentID + ":" + period }
 
+// payoutExpired reports whether the marker's dedup window has closed.
+func payoutExpired(p CommissionPayout, now time.Time) bool {
+	if p.ExpiresAt != "" {
+		if exp, err := time.Parse(time.RFC3339, p.ExpiresAt); err == nil {
+			return now.After(exp)
+		}
+	}
+	if ts, err := time.Parse(time.RFC3339, p.PaidAt); err == nil {
+		return now.Sub(ts) > commissionPayoutTTL
+	}
+	return false
+}
+
+// payoutMarked reports whether a live (unexpired) payout marker exists for
+// (agentID, period). An expired marker is treated as absent so a reused
+// period key starts a fresh attempt (mirrors the PSM idempotency TTL).
 func (w *Workflows) payoutMarked(agentID, period string) bool {
 	var p CommissionPayout
 	ok, err := w.st.Get("commission_payouts", payoutKey(agentID, period), &p)
-	return err == nil && ok
+	if err != nil || !ok {
+		return false
+	}
+	return !payoutExpired(p, time.Now())
+}
+
+// PurgeExpiredCommissionPayouts deletes expired payout markers. Markers are
+// written only after a successful post (terminal by construction), and the
+// purge additionally requires a recorded TransferID as a terminal guard, so
+// a partially-written record is never purged. Returns the number purged.
+func (w *Workflows) PurgeExpiredCommissionPayouts() (int, error) {
+	var markers []CommissionPayout
+	if err := w.st.List("commission_payouts", &markers); err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	purged := 0
+	for _, p := range markers {
+		if !payoutExpired(p, now) || p.TransferID == "" {
+			continue
+		}
+		if _, err := w.st.Delete("commission_payouts", payoutKey(p.AgentID, p.Period)); err != nil {
+			return purged, err
+		}
+		purged++
+	}
+	return purged, nil
 }
 
 // nextPayoutPendingID finds the next fresh deterministic pending-transfer id
@@ -425,6 +476,7 @@ func (w *Workflows) nextPayoutPendingID(agentID, period, poolID, acctID string, 
 func (w *Workflows) markPayout(agentID, period string, amount uint64, transferID string) error {
 	return w.st.Put("commission_payouts", payoutKey(agentID, period), CommissionPayout{
 		AgentID: agentID, Period: period, AmountKobo: amount, TransferID: transferID, PaidAt: nowRFC3339(),
+		ExpiresAt: time.Now().Add(commissionPayoutTTL).UTC().Format(time.RFC3339),
 	})
 }
 

@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Allow `pytest` from the repo root (assurance R4): Python services live under
+# services/; each carries its own conftest with path bootstrapping.
+testpaths = ["services/kyc-engine/tests"]
