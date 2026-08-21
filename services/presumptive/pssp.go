@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -225,21 +226,28 @@ type PSSPHub struct {
 }
 
 // NewPSSPHub wires provider adapters per H1: PSSP_API_URL set → the real
-// signed HTTP adapter is registered as provider "pssp" (profile=prod);
-// the deterministic provider simulators always remain available for dev
-// and for side-by-side testing.
+// signed HTTP adapter is registered as provider "pssp" (profile=prod).
+// The deterministic provider simulators are registered for PROFILE=dev
+// only (QA-20): under profile=prod a simulator provider must never be
+// selectable on the funds path, so prod refuses to boot without
+// PSSP_API_URL (hard-fatal, same contract as the NIMC adapter).
 func NewPSSPHub() *PSSPHub {
-	adapters := map[string]PSSPAdapter{
-		// [SIM] schedules: commercial PSSP rates with the documented ₦2,000
-		// cap (G12); env PSSP_FEE_RATE_BPS_<P> / PSSP_FEE_CAP_KOBO_<P> override.
-		"remita":      newPSSPSim("remita", "RRR-%s", feeScheduleFor("remita", FeeSchedule{RateBps: 100, CapKobo: 200000})),           // 1.00% capped N2,000
-		"etranzact":   newPSSPSim("etranzact", "ETZ-%s", feeScheduleFor("etranzact", FeeSchedule{RateBps: 75, CapKobo: 200000})),      // 0.75% capped N2,000
-		"flutterwave": newPSSPSim("flutterwave", "FLW-%s", feeScheduleFor("flutterwave", FeeSchedule{RateBps: 140, CapKobo: 200000})), // 1.40% capped N2,000
-	}
+	adapters := map[string]PSSPAdapter{}
 	if u := os.Getenv("PSSP_API_URL"); u != "" {
 		log.Printf("profile=prod component=pssp-adapter url=%s", u)
 		adapters["pssp"] = NewPSSPHTTPAdapter(u, os.Getenv("PSSP_API_KEY"))
+	}
+	if keyx.Prod() {
+		if _, ok := adapters["pssp"]; !ok {
+			log.Fatal("profile=prod FATAL: PSSP_API_URL is required (refusing to start with PSSP provider simulators selectable)")
+		}
+		log.Printf("profile=prod component=pssp-adapter (simulators disabled)")
 	} else {
+		// [SIM] schedules: commercial PSSP rates with the documented ₦2,000
+		// cap (G12); env PSSP_FEE_RATE_BPS_<P> / PSSP_FEE_CAP_KOBO_<P> override.
+		adapters["remita"] = newPSSPSim("remita", "RRR-%s", feeScheduleFor("remita", FeeSchedule{RateBps: 100, CapKobo: 200000}))           // 1.00% capped N2,000
+		adapters["etranzact"] = newPSSPSim("etranzact", "ETZ-%s", feeScheduleFor("etranzact", FeeSchedule{RateBps: 75, CapKobo: 200000}))      // 0.75% capped N2,000
+		adapters["flutterwave"] = newPSSPSim("flutterwave", "FLW-%s", feeScheduleFor("flutterwave", FeeSchedule{RateBps: 140, CapKobo: 200000})) // 1.40% capped N2,000
 		log.Printf("profile=dev component=pssp-adapter (simulators)")
 	}
 	return &PSSPHub{
@@ -296,7 +304,12 @@ func (h *PSSPHub) VerifyWebhookSignatureFor(provider, signature string, body []b
 func (h *PSSPHub) Adapter(provider string) (PSSPAdapter, error) {
 	a, ok := h.adapters[strings.ToLower(provider)]
 	if !ok {
-		return nil, fmt.Errorf("unknown PSSP provider %q (have remita, etranzact, flutterwave)", provider)
+		avail := make([]string, 0, len(h.adapters))
+		for name := range h.adapters {
+			avail = append(avail, name)
+		}
+		sort.Strings(avail)
+		return nil, fmt.Errorf("unknown PSSP provider %q (have %s)", provider, strings.Join(avail, ", "))
 	}
 	return a, nil
 }

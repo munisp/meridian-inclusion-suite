@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -183,7 +184,16 @@ func (s *server) createIntent(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, p)
 }
 
+// listPayments is paginated (QA-08): the funds-path list endpoint must
+// never return an unbounded result set. limit defaults to 50 and is
+// clamped to maxListPaymentsLimit (500); offset defaults to 0.
+const (
+	defaultListPaymentsLimit = 50
+	maxListPaymentsLimit     = 500
+)
+
 func (s *server) listPayments(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listPaymentsPage(r)
 	ps, err := s.pay.List()
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusInternalServerError, "store_error", err.Error())
@@ -192,7 +202,46 @@ func (s *server) listPayments(w http.ResponseWriter, r *http.Request) {
 	if ps == nil {
 		ps = []Payment{}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"payments": ps, "count": len(ps)})
+	total := len(ps)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := ps[offset:end]
+	if page == nil {
+		page = []Payment{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"payments": page,
+		"count":    len(page),
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+	})
+}
+
+// listPaymentsPage parses ?limit=&offset= with a default of 50 and a hard
+// max of 500; invalid values fall back to the defaults (fail-safe small).
+func listPaymentsPage(r *http.Request) (limit, offset int) {
+	limit = defaultListPaymentsLimit
+	offset = 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxListPaymentsLimit {
+		limit = maxListPaymentsLimit
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }
 
 func (s *server) getPayment(w http.ResponseWriter, r *http.Request) {
