@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
@@ -58,5 +57,5 @@ func main() {
 	handler := httpx.CORS(httpx.Auth(publicPath)(srv.routes()))
 	log.Printf("presumptive %s listening on :%s (ledger=%T reg_watch=%s packs=%d)",
 		serviceVersion, port, lc, os.Getenv("REG_WATCH_URL"), len(engine.Packs()))
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+	log.Fatal(httpx.ListenAndServe(":"+port, handler))
 }

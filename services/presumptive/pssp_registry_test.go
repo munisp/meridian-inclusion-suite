@@ -93,6 +93,9 @@ func TestPSSPStatusPromotion(t *testing.T) {
 func TestPSSPWebhookUnknownProviderProdRejected(t *testing.T) {
 	t.Setenv("APP_PROFILE", "prod")
 	t.Setenv("PSSP_WEBHOOK_SECRET", "prod-shared-secret")
+	// QA-20: profile=prod now requires the real PSSP adapter (simulators are
+	// dev-only), so the hub under test boots with PSSP_API_URL configured.
+	t.Setenv("PSSP_API_URL", "http://127.0.0.1:1")
 	defer t.Setenv("APP_PROFILE", "")
 	st, _ := store.Open("")
 	reg := NewPSSPRegistry(st, NewPSSPHub())

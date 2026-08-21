@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 )
 
 // nip.go — NIP (NIBSS Instant Payments) rail adapter skeleton (N1).
@@ -239,15 +241,20 @@ func (s *nipSim) Reversal(originalSessionID, reason string) (NIPTransferResult, 
 //     NIP_TLS_CERT_FILE/NIP_TLS_KEY_FILE are set)
 //   - otherwise                -> [SIM] simulator (dev default)
 //
-// FAIL-CLOSED: when NIP_RAIL=live the service refuses to run payouts on the
-// simulator. If the live rail is configured but unreachable (Probe fails),
-// or NIP_RAIL=live is set without NIP_API_URL, an error is returned and the
-// caller must not start the payout path.
+// FAIL-CLOSED: when NIP_RAIL=live OR PROFILE=prod (QA-21) the service
+// refuses to run payouts on the simulator. If the live rail is configured
+// but unreachable (Probe fails), or the live rail is required without
+// NIP_API_URL, an error is returned and the caller must not start the
+// payout path.
 func NewNIPRailFromEnv() (NIPRail, error) {
 	url := os.Getenv("NIP_API_URL")
 	live := strings.EqualFold(os.Getenv("NIP_RAIL"), "live")
-	if live && url == "" {
-		return nil, fmt.Errorf("NIP_RAIL=live but NIP_API_URL is unset: refusing to fall back to simulator (fail-closed)")
+	// QA-21: PROFILE=prod must fail closed exactly like NIP_RAIL=live —
+	// otherwise a prod deploy that forgets NIP_RAIL silently pays out on
+	// the simulator.
+	prod := keyx.Prod()
+	if (live || prod) && url == "" {
+		return nil, fmt.Errorf("live NIP rail required (NIP_RAIL=live or PROFILE=prod) but NIP_API_URL is unset: refusing to fall back to simulator (fail-closed)")
 	}
 	if url == "" {
 		log.Printf("profile=dev component=nip-adapter ([SIM] simulator)")
@@ -258,8 +265,8 @@ func NewNIPRailFromEnv() (NIPRail, error) {
 		return nil, fmt.Errorf("nip adapter init: %w (fail-closed)", err)
 	}
 	if err := rail.Probe(); err != nil {
-		if live {
-			return nil, fmt.Errorf("NIP_RAIL=live but rail %s unreachable: %v (fail-closed)", url, err)
+		if live || prod {
+			return nil, fmt.Errorf("live NIP rail required (NIP_RAIL=live or PROFILE=prod) but rail %s unreachable: %v (fail-closed)", url, err)
 		}
 		log.Printf("component=nip-adapter warn: live rail probe failed, keeping adapter (NIP_RAIL!=live): %v", err)
 	}
