@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"net/http"
 	"os"
 
 	"strings"
@@ -56,7 +55,7 @@ func main() {
 	handler := httpx.MaxBody(httpx.CORS(httpx.Auth(publicPath)(srv.routes())))
 	log.Printf("ussd-gateway %s listening on :%s (service_code=%s ttl=%ds menus=%d)",
 		serviceVersion, port, graph.ServiceCode, graph.SessionTTLSeconds, len(graph.Menus))
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+	log.Fatal(httpx.ListenAndServe(":"+port, handler))
 }
 
 // publicPath lists routes exempt from httpx.Auth. F-3: /v1/simulate is a
