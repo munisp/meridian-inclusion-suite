@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
@@ -81,6 +82,19 @@ func (r *RecoverySweeper) SweepOnce() (resumed, compensated, expired int, err er
 			// Terminal-failed payments must not hold funds: void any
 			// dangling pending hold left by an earlier failure path.
 			if r.voidFailedHold(&p) {
+				compensated++
+			}
+		case "compensated":
+			// FF-4: a compensated payment must not hold funds either — if
+			// the compensation-time hold void failed (or the record predates
+			// it), the pending hold is still locking the payer's balance.
+			if r.voidFailedHold(&p) {
+				compensated++
+			}
+			// FF-5: a compensation whose PSSP refund failed was previously
+			// terminal ("failed:<err>" with no retry) while the payer stayed
+			// charged at the provider. Retry it durably until it lands.
+			if r.retryFailedRefund(&p) {
 				compensated++
 			}
 		}
@@ -183,6 +197,57 @@ func (r *RecoverySweeper) voidFailedHold(p *Payment) bool {
 	}
 	log.Printf("recovery: voided dangling hold on failed payment %s", p.ID)
 	return true
+}
+
+// retryFailedRefund re-drives compensation records whose PSSP refund (or
+// hold void) failed at compensation time (FF-5). The compensation record is
+// the durable outbox: a "failed:" marker is retried on every sweep and only
+// rewritten to a success marker after the provider confirms. Returns true
+// when a record was updated.
+func (r *RecoverySweeper) retryFailedRefund(p *Payment) bool {
+	var comps []Compensation
+	if err := r.st.List("compensations", &comps); err != nil {
+		return false
+	}
+	updated := false
+	for _, c := range comps {
+		if c.PaymentID != p.ID {
+			continue
+		}
+		if strings.HasPrefix(c.HoldVoid, "failed:") && p.PendingTransferID != "" {
+			// FF-4 follow-up: retry the hold void.
+			t, err := r.lc.LookupTransfer(p.PendingTransferID)
+			if err == nil && t.Pending {
+				if _, verr := r.lc.VoidPending(p.PendingTransferID); verr != nil {
+					continue // leave the failed marker; next sweep retries
+				}
+			}
+			c.HoldVoid = "ok (retried)"
+		}
+		if strings.HasPrefix(c.PSSPRefund, "failed:") && p.PSSPRef != "" {
+			adapter, err := r.pay.hub.Adapter(p.Provider)
+			if err != nil {
+				continue // provider unavailable; next sweep retries
+			}
+			if err := adapter.Refund(p.PSSPRef, p.AmountKobo); err != nil {
+				if verr := adapter.Void(p.PSSPRef); verr != nil {
+					continue // still failing; leave the failed marker for retry
+				} else {
+					c.PSSPRefund = "ok (void fallback, retried)"
+				}
+			} else {
+				c.PSSPRefund = "ok (retried)"
+			}
+		}
+		if strings.HasPrefix(c.HoldVoid, "ok (retried)") || strings.HasPrefix(c.PSSPRefund, "ok (") {
+			if err := r.pay.st.Put("compensations", c.ID, c); err == nil {
+				updated = true
+				log.Printf("recovery: compensation %s for payment %s completed on retry (pssp_refund=%s hold_void=%s)",
+					c.ID, p.ID, c.PSSPRefund, c.HoldVoid)
+			}
+		}
+	}
+	return updated
 }
 
 // expireIntent voids the pending hold of an abandoned intent.

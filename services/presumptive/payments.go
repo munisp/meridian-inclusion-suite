@@ -433,6 +433,7 @@ type Compensation struct {
 	Cause          string `json:"cause"`
 	LedgerReversal string `json:"ledger_reversal,omitempty"` // reversal transfer id
 	PSSPRefund     string `json:"pssp_refund"`               // ok|failed:<err>|skipped
+	HoldVoid       string `json:"hold_void,omitempty"`       // ok|failed:<err> (FF-4)
 	CreatedAt      string `json:"created_at"`
 }
 
@@ -493,6 +494,21 @@ func (s *PaymentService) compensateCapture(p *Payment, cause string) string {
 					}
 				}
 			}
+		}
+	}
+	// 1b) void the still-pending ledger hold (FF-4): the compensation used
+	// to refund the payer via the PSSP but never voided the pending hold, so
+	// the payer's available balance stayed locked permanently. A failed void
+	// is recorded on the compensation and retried by the recovery sweeper.
+	if p.PendingTransferID != "" {
+		if t, err := s.lc.LookupTransfer(p.PendingTransferID); err == nil && t.Pending {
+			if _, err := s.lc.VoidPending(p.PendingTransferID); err != nil {
+				comp.HoldVoid = "failed: " + err.Error()
+			} else {
+				comp.HoldVoid = "ok"
+			}
+		} else {
+			comp.HoldVoid = "ok" // hold already consumed/voided/expired
 		}
 	}
 	// 2) PSSP refund (fallback: void)
