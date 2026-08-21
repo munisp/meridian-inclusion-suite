@@ -193,6 +193,20 @@ func devSecret() string {
 	return "meridian-dev-secret"
 }
 
+// ProdAuthMisconfigured reports whether PROFILE=prod is combined with
+// forgeable dev authentication: AUTH_MODE != keycloak, or the dev JWT
+// secret missing/still the built-in default ("meridian-dev-secret").
+// Callers must fail closed when this is true.
+func ProdAuthMisconfigured() bool {
+	if os.Getenv("PROFILE") != "prod" {
+		return false
+	}
+	if os.Getenv("AUTH_MODE") != "keycloak" {
+		return true
+	}
+	return devSecret() == "meridian-dev-secret"
+}
+
 // validateHS256 validates a dev HS256 JWT and returns its claims.
 func validateHS256(token string) (map[string]any, bool) {
 	parts := strings.Split(token, ".")
@@ -225,6 +239,17 @@ func validateHS256(token string) (map[string]any, bool) {
 // X-Dev-Role: admin|operator|auditor OR a Bearer HS256 dev JWT.
 // Public paths (healthz/readyz and explicitly public routes) bypass it.
 func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
+	// A1-10: PROFILE=prod with dev-mode auth or the default/missing dev
+	// secret must never serve — both are fully forgeable. Fail closed.
+	if ProdAuthMisconfigured() {
+		log.Printf("profile=prod component=auth FAIL-CLOSED: PROFILE=prod with dev AUTH_MODE or default/missing MERIDIAN_DEV_JWT_SECRET; all requests denied")
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				WriteProblem(w, http.StatusServiceUnavailable, "auth_misconfigured",
+					"PROFILE=prod refuses dev auth / default JWT secret; refusing all requests (fail closed)")
+			})
+		}
+	}
 	if os.Getenv("AUTH_MODE") == "keycloak" {
 		log.Printf("profile=prod component=auth (keycloak issuer=%s)", os.Getenv("KEYCLOAK_ISSUER"))
 		return authx.Middleware(authx.NewVerifier(authx.ConfigFromEnv()), publicPath)
