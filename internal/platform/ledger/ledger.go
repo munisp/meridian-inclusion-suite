@@ -345,7 +345,7 @@ func (c *DevClient) PostPendingAs(pendingID, postID string, amount uint64) (stri
 		DebitAccountID:  pt.DebitAccountID,
 		CreditAccountID: pt.CreditAccountID,
 		Ledger:          pt.Ledger,
-		Code:            CodeCapture,
+		Code:            pt.Code, // reuse the pending transfer's code (TB post_pending semantics)
 		Amount:          amount,
 		Pending:         false,
 		UserData:        pt.UserData,
