@@ -2,25 +2,25 @@
 # Docker image; the service degrades gracefully ([SIM]-tagged fallbacks) when
 # they are absent (e.g. light CI) — see requirements-test.txt for the minimal
 # test set.
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.6
-pydantic-settings>=2.2
-SQLAlchemy>=2.0
-psycopg[binary]>=3.1            # Postgres prod (DATABASE_URL)
-httpx>=0.27
-numpy>=1.26
-pillow>=10.0
-cryptography>=42.0              # Keycloak RS256 verification
-boto3>=1.34                     # MinIO/S3 WORM storage (MINIO_URL set)
-kafka-python>=2.0.2             # evidence outbox relay (KAFKA_BOOTSTRAP set)
-python-multipart>=0.0.9         # multipart uploads
-temporalio>=1.8                 # TEMPORAL_URL set -> durable workflows
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+pydantic-settings==2.15.0
+SQLAlchemy==2.0.52
+psycopg[binary]==3.3.4  # Postgres prod (DATABASE_URL)
+httpx==0.28.1
+numpy==2.5.2
+pillow==12.3.0
+cryptography==50.0.0  # Keycloak RS256 verification
+boto3==1.43.77  # MinIO/S3 WORM storage (MINIO_URL set)
+kafka-python==3.0.11  # evidence outbox relay (KAFKA_BOOTSTRAP set)
+python-multipart==0.0.32  # multipart uploads
+temporalio==1.31.0  # TEMPORAL_URL set -> durable workflows
 # --- CPU inference stack (image build; ~1.9GB) ---
-docling>=2.0
-paddlepaddle==2.6.*
-paddleocr>=2.8,<4.0  # 2.x & 3.x both supported (stage_ocr is signature-tolerant); 4.x unvetted
-onnxruntime==1.19.*
+docling==2.121.0
+paddlepaddle==2.6.2
+paddleocr==3.7.0  # 2.x & 3.x both supported (stage_ocr is signature-tolerant); 4.x unvetted
+onnxruntime==1.19.2
 insightface==0.7.3
-mediapipe==0.10.*
-ollama>=0.3.0
+mediapipe==0.10.35
+ollama==0.6.2
