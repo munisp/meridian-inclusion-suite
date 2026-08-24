@@ -42,9 +42,11 @@ import (
 //	POST /reversal              -> Reversal
 //	GET  /healthz               -> Probe
 //
-// Retries: 3-attempt exponential backoff + circuit breaker (5 failures ->
-// open 30s), mirroring the PSSP adapter. TSQ — never blind retry — is the
-// recovery mechanism for ambiguous transfer outcomes (see nip_recon.go).
+// Retries: idempotent queries (name-enquiry, TSQ, health) get 3-attempt
+// exponential backoff + circuit breaker (5 failures -> open 30s).
+// funds-transfer gets EXACTLY ONE attempt (B3 #18): TSQ — never blind
+// retry — is the recovery mechanism for ambiguous transfer outcomes (see
+// nip_recon.go).
 type NIPHTTPAdapter struct {
 	base   string
 	apiKey string
@@ -106,13 +108,26 @@ func (a *NIPHTTPAdapter) Probe() error {
 	return nil
 }
 
-// post issues one signed JSON POST to the NIP endpoint.
+// post issues one signed JSON POST to the NIP endpoint with bounded
+// retries — safe ONLY for idempotent queries (name-enquiry, TSQ, health).
 func (a *NIPHTTPAdapter) post(path, sessionID string, payload any, out any) error {
+	return a.postAttempt(path, sessionID, payload, out, true)
+}
+
+// postOnce issues exactly ONE signed POST (breaker-guarded, no retry).
+// B3 #18: funds-transfer MUST use this path — a retried transfer POST is a
+// blind retry that can double-debit; ambiguous outcomes are resolved by
+// the TSQ sweeper (never-blind-retry doctrine, see nip_recon.go).
+func (a *NIPHTTPAdapter) postOnce(path, sessionID string, payload any, out any) error {
+	return a.postAttempt(path, sessionID, payload, out, false)
+}
+
+func (a *NIPHTTPAdapter) postAttempt(path, sessionID string, payload any, out any, retryable bool) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	return a.brk.Retry(3, func() error {
+	attempt := func() error {
 		req, err := http.NewRequest(http.MethodPost, a.base+path, bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -139,7 +154,11 @@ func (a *NIPHTTPAdapter) post(path, sessionID string, payload any, out any) erro
 			return fmt.Errorf("nip adapter: decode: %w", err)
 		}
 		return nil
-	})
+	}
+	if retryable {
+		return a.brk.Retry(3, attempt)
+	}
+	return a.brk.Do(attempt)
 }
 
 // signRequest applies the NIBSS-convention credential + signature headers.
@@ -174,9 +193,10 @@ func (a *NIPHTTPAdapter) NameEnquiry(account, bankCode string) (NameEnquiryResul
 }
 
 // FundsTransfer moves value to a verified beneficiary: POST /funds-transfer.
+// B3 #18: exactly one dispatch attempt — no blind retry (double-debit risk).
 func (a *NIPHTTPAdapter) FundsTransfer(req NIPTransferRequest) (NIPTransferResult, error) {
 	var out NIPTransferResult
-	err := a.post("/funds-transfer", req.SessionID, req, &out)
+	err := a.postOnce("/funds-transfer", req.SessionID, req, &out)
 	if err != nil {
 		// transport failure after dispatch is the classic ambiguous case:
 		// report in_flight so the TSQ sweeper resolves it — NEVER retry
