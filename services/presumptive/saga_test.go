@@ -227,7 +227,7 @@ func TestCaptureTransportErrorIndeterminateThenSwept(t *testing.T) {
 	adapter.verifyErr = nil
 	adapter.verifyStatus = "authorised"
 	sw := NewRecoverySweeper(pay, lc, events.NewInprocBus())
-	if _, _, _, err := sw.SweepOnce(); err != nil {
+	if _, _, _, _, err := sw.SweepOnce(); err != nil {
 		t.Fatal(err)
 	}
 	var got Payment
@@ -252,7 +252,7 @@ func TestCaptureInFlightSweptToCaptured(t *testing.T) {
 	adapter.verifyErr = nil
 	adapter.verifyStatus = "captured"
 	sw := NewRecoverySweeper(pay, lc, events.NewInprocBus())
-	resumed, _, _, err := sw.SweepOnce()
+	resumed, _, _, _, err := sw.SweepOnce()
 	if err != nil || resumed != 1 {
 		t.Fatalf("sweeper must resume the capture: resumed=%d err=%v", resumed, err)
 	}
@@ -265,7 +265,7 @@ func TestCaptureInFlightSweptToCaptured(t *testing.T) {
 		t.Fatalf("collections must hold the captured amount exactly once, got %+v", bal)
 	}
 	// a second sweep is a no-op (idempotent)
-	resumed, _, _, _ = sw.SweepOnce()
+	resumed, _, _, _, _ = sw.SweepOnce()
 	if resumed != 0 {
 		t.Fatalf("second sweep must be a no-op, resumed=%d", resumed)
 	}

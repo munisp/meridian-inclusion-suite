@@ -50,13 +50,21 @@ func NewRecoverySweeper(pay *PaymentService, lc ledger.Client, bus events.Bus) *
 }
 
 // SweepOnce performs one recovery pass. Returns counts for observability.
-func (r *RecoverySweeper) SweepOnce() (resumed, compensated, expired int, err error) {
+func (r *RecoverySweeper) SweepOnce() (resumed, compensated, expired, settled int, err error) {
 	var payments []Payment
 	if err := r.st.List("payments", &payments); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	for _, p := range payments {
 		switch p.Status {
+		case "captured":
+			// B3 #12: post-settlement transition — "settled" was an
+			// unreachable enum value (no writer); every payment stranded
+			// at "captured". The sweeper confirms the post transfer on the
+			// ledger and settles the payment.
+			if r.settleCaptured(&p) {
+				settled++
+			}
 		case "captured_awaiting_post":
 			switch r.resumeCapture(&p) {
 			case "resumed":
@@ -99,7 +107,32 @@ func (r *RecoverySweeper) SweepOnce() (resumed, compensated, expired int, err er
 			}
 		}
 	}
-	return resumed, compensated, expired, nil
+	return resumed, compensated, expired, settled, nil
+}
+
+// settleCaptured performs the B3 #12 post-settlement transition: a
+// captured payment becomes "settled" only after its post transfer is
+// VERIFIED posted on the core ledger (LookupTransfer, not assumption).
+// Payments whose post cannot be confirmed stay "captured" — settled is
+// never asserted without ledger proof. Idempotent: once settled the
+// payment leaves this case.
+func (r *RecoverySweeper) settleCaptured(p *Payment) bool {
+	if p.PostTransferID == "" {
+		return false
+	}
+	t, err := r.lc.LookupTransfer(p.PostTransferID)
+	if err != nil || t.Pending {
+		return false // not confirmed (or unverifiable) yet: stay captured
+	}
+	p.Status = "settled"
+	p.UpdatedAt = nowRFC3339()
+	if err := r.pay.st.Put("payments", p.ID, *p); err != nil {
+		return false
+	}
+	r.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{
+		"payment_id": p.ID, "status": "settled", "post_transfer_id": p.PostTransferID,
+	}))
+	return true
 }
 
 // resumeCapture finishes (or compensates) one interrupted capture saga.
@@ -279,8 +312,8 @@ func (r *RecoverySweeper) expireIntent(p *Payment) bool {
 // StartRecovery runs a sweep immediately (boot recovery) and then every
 // interval until stop is closed. Called once from main.
 func (r *RecoverySweeper) StartRecovery(stop <-chan struct{}) {
-	resumed, compensated, expired, err := r.SweepOnce()
-	log.Printf("recovery: boot sweep resumed=%d compensated=%d expired=%d err=%v", resumed, compensated, expired, err)
+	resumed, compensated, expired, settled, err := r.SweepOnce()
+	log.Printf("recovery: boot sweep resumed=%d compensated=%d expired=%d settled=%d err=%v", resumed, compensated, expired, settled, err)
 	go func() {
 		tick := time.NewTicker(recoveryInterval)
 		defer tick.Stop()
@@ -289,10 +322,10 @@ func (r *RecoverySweeper) StartRecovery(stop <-chan struct{}) {
 			case <-stop:
 				return
 			case <-tick.C:
-				if resumed, compensated, expired, err := r.SweepOnce(); err != nil {
+				if resumed, compensated, expired, settled, err := r.SweepOnce(); err != nil {
 					log.Printf("recovery: sweep error: %v", err)
-				} else if resumed+compensated+expired > 0 {
-					log.Printf("recovery: sweep resumed=%d compensated=%d expired=%d", resumed, compensated, expired)
+				} else if resumed+compensated+expired+settled > 0 {
+					log.Printf("recovery: sweep resumed=%d compensated=%d expired=%d settled=%d", resumed, compensated, expired, settled)
 				}
 			}
 		}
