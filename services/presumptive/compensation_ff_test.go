@@ -127,7 +127,7 @@ func TestSweeperVoidsDanglingHoldOnCompensated(t *testing.T) {
 	// the compensation record
 	fl.failVoid = false
 	sw := NewRecoverySweeper(pay, lc, events.NewInprocBus())
-	if _, _, _, err := sw.SweepOnce(); err != nil {
+	if _, _, _, _, err := sw.SweepOnce(); err != nil {
 		t.Fatal(err)
 	}
 	tr2, _ := lc.LookupTransfer(pendID)
@@ -162,7 +162,7 @@ func TestFailedPSSPRefundRetriedBySweeper(t *testing.T) {
 	// provider recovers; the sweep must retry and close the compensation
 	flaky.failRefund = false
 	sw := NewRecoverySweeper(pay, lc, events.NewInprocBus())
-	if _, _, _, err := sw.SweepOnce(); err != nil {
+	if _, _, _, _, err := sw.SweepOnce(); err != nil {
 		t.Fatal(err)
 	}
 	if flaky.refunded == 0 {
@@ -177,7 +177,7 @@ func TestFailedPSSPRefundRetriedBySweeper(t *testing.T) {
 	}
 	// idempotent: further sweeps do not refund again
 	n := flaky.refunded
-	if _, _, _, err := sw.SweepOnce(); err != nil {
+	if _, _, _, _, err := sw.SweepOnce(); err != nil {
 		t.Fatal(err)
 	}
 	if flaky.refunded != n {

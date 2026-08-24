@@ -175,7 +175,7 @@ func TestRecoverySweepResumesCrashAfterPost(t *testing.T) {
 	before, _ := ts.lc.Balance(ledger.AccountID(nsPSMCollections, 1))
 	// --- process restart: recovery sweeper runs ---
 	sw := NewRecoverySweeper(ts.pay, ts.lc, events.NewInprocBus())
-	resumed, compensated, _, err := sw.SweepOnce()
+	resumed, compensated, _, _, err := sw.SweepOnce()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestRecoverySweepResumesCrashAfterPost(t *testing.T) {
 		t.Fatalf("sweeper must not double-post: before=%+v after=%+v", before, after)
 	}
 	// sweeping again is a no-op
-	resumed, _, _, _ = sw.SweepOnce()
+	resumed, _, _, _, _ = sw.SweepOnce()
 	if resumed != 0 {
 		t.Fatal("second sweep must be a no-op")
 	}
@@ -213,7 +213,7 @@ func TestRecoverySweepCompensatesLegacyRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	sw := NewRecoverySweeper(ts.pay, ts.lc, events.NewInprocBus())
-	resumed, compensated, _, err := sw.SweepOnce()
+	resumed, compensated, _, _, err := sw.SweepOnce()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestRecoveryExpiresAbandonedIntents(t *testing.T) {
 		t.Fatal(err)
 	}
 	sw := NewRecoverySweeper(ts.pay, ts.lc, events.NewInprocBus())
-	if _, _, expired, err := sw.SweepOnce(); err != nil || expired != 1 {
+	if _, _, expired, _, err := sw.SweepOnce(); err != nil || expired != 1 {
 		t.Fatalf("expected 1 expired intent, got %d err=%v", expired, err)
 	}
 	var got Payment
