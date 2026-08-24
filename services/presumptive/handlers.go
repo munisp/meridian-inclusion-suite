@@ -336,6 +336,11 @@ func (s *server) onboardPSSP(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.pssps.Onboard(in)
 	if err != nil {
+		var ve *OnboardValidationError
+		if errors.As(err, &ve) {
+			httpx.WriteProblem(w, http.StatusBadRequest, "onboard_validation", err.Error())
+			return
+		}
 		httpx.WriteProblem(w, http.StatusConflict, "onboard_error", err.Error())
 		return
 	}
