@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.make_fixtures import cac_cert, face_pair, nin_slip, valid_rc
 
-AGENT = {"X-Dev-Role": "kyc.agent"}
-REVIEWER = {"X-Dev-Role": "kyc.reviewer"}
+AGENT = {"X-Dev-Role": "kyc.agent", "X-Dev-Subject": "agent-1"}
+REVIEWER = {"X-Dev-Role": "kyc.reviewer", "X-Dev-Subject": "reviewer-1"}
 
 
 def _upload(client, case_id, png, doc_type):
@@ -131,3 +131,46 @@ def test_liveness_ws_session(client):
 def test_unknown_ws_session(client):
     with client.websocket_connect("/liveness/nope") as ws:
         assert ws.receive_json()["type"] == "error"
+
+
+
+def _step_up_case(client, creator_headers):
+    cid = client.post("/v1/cases", json={"subject_type": "individual"},
+                      headers=creator_headers).json()["case_id"]
+    client.put(f"/v1/cases/{cid}/documents",
+               files={"file": ("doc.png", nin_slip(conf=0.6), "image/png")},
+               data={"doc_type": "nin_slip"}, headers=creator_headers)
+    client.post(f"/v1/cases/{cid}/process", headers=creator_headers)
+    case = client.get(f"/v1/cases/{cid}", headers=creator_headers).json()
+    assert case["status"] == "step_up", case
+    return cid
+
+
+def test_review_actor_bound_to_principal(client):
+    """B2-#13: review audit event actor is the authenticated principal
+    subject, not the orchestrator's 'user' default."""
+    cid = _step_up_case(client, AGENT)
+    r = client.post(f"/v1/cases/{cid}/review",
+                    json={"action": "reject", "note": "blurry"},
+                    headers={"X-Dev-Role": "kyc.reviewer", "X-Dev-Subject": "reviewer-9"})
+    assert r.status_code == 200, r.text
+    ev = client.get(f"/v1/cases/{cid}/evidence", headers=AGENT).json()
+    review_events = [l for l in ev["links"] if l["event_type"] == "kyc.review.v1"]
+    assert review_events, "review event missing from evidence chain"
+    assert review_events[-1]["payload"]["actor"] == "reviewer-9"
+    assert review_events[-1]["payload"]["actor"] != "user"
+
+
+def test_review_self_approval_rejected(client):
+    """B2-#13: an admin who created a case cannot approve it themselves
+    (admin holds both create and review roles); a different admin may."""
+    admin1 = {"X-Dev-Role": "kyc.admin", "X-Dev-Subject": "admin-1"}
+    admin2 = {"X-Dev-Role": "kyc.admin", "X-Dev-Subject": "admin-2"}
+    cid = _step_up_case(client, admin1)
+    r = client.post(f"/v1/cases/{cid}/review",
+                    json={"action": "approve", "note": "self"}, headers=admin1)
+    assert r.status_code == 403, r.text
+    r2 = client.post(f"/v1/cases/{cid}/review",
+                     json={"action": "approve", "note": "independent"}, headers=admin2)
+    assert r2.status_code == 200, r2.text
+    assert client.get(f"/v1/cases/{cid}", headers=admin2).json()["status"] == "approved"

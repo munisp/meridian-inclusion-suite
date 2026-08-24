@@ -154,3 +154,12 @@ def require_case_access(case, principal: Principal) -> None:
         return
     if case.agent_ref and case.agent_ref != principal.subject:
         raise HTTPException(403, "case belongs to another agent")
+
+
+def require_not_creator(case, principal: Principal) -> None:
+    """Separation of duties (audit fix B2-#13): the reviewer deciding a case
+    must not be the principal who created it — even when they hold a role
+    (e.g. ROLE_ADMIN) allowed on BOTH the create and review routes."""
+    if case.agent_ref and case.agent_ref == principal.subject:
+        raise HTTPException(
+            403, "separation of duties: cannot review a case you created")
