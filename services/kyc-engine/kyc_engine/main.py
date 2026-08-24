@@ -7,7 +7,8 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 
 from .auth import (ROLE_ADMIN, ROLE_AGENT, ROLE_REVIEWER, Principal,
-                   current_principal, require_case_access, require_role)
+                   current_principal, require_case_access, require_not_creator,
+                   require_role)
 from .adapters import audit
 from .adapters.storage import get_storage
 from .config import get_settings
@@ -193,9 +194,21 @@ async def liveness_socket(websocket: WebSocket, session_id: str):
 
 @app.post("/v1/cases/{case_id}/review",
           dependencies=[Depends(require_role(ROLE_REVIEWER, ROLE_ADMIN))])
-def review(case_id: str, req: ReviewRequest):
+def review(case_id: str, req: ReviewRequest,
+           principal: Principal = Depends(current_principal)):
+    # Audit fix B2-#13: actor is the JWT/dev principal subject (never the
+    # orchestrator "user" default) and the reviewer may not decide a case
+    # they themselves created (separation of duties).
+    sess = get_session()
     try:
-        return review_case(case_id, req.action, req.note)
+        case = sess.get(KycCase, case_id)
+        if case is None:
+            raise HTTPException(404, "case not found")
+        require_not_creator(case, principal)
+    finally:
+        sess.close()
+    try:
+        return review_case(case_id, req.action, req.note, actor=principal.subject)
     except KeyError:
         raise HTTPException(404, "case not found")
     except ValueError as e:
