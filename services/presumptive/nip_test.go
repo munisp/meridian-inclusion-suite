@@ -287,7 +287,17 @@ func TestDevProfileSelectsSim(t *testing.T) {
 // recorded as a distinct purpose.
 func TestRefundPathGatedAndRecorded(t *testing.T) {
 	svc := nipTestService(t, NewNIPSim(), true)
+	// B3 #4: a refund must bind to a successful prior payout.
+	src, err := svc.Payout(payoutReq("0123456789"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.Status != NIPStatusSuccess {
+		t.Fatalf("source payout: %+v", src)
+	}
 	req := payoutReq("0123456789")
+	req.IdempotencyKey = "refund-0123456789" // distinct key from the source payout
+	req.SourceSessionID = src.SessionID
 	tr, err := svc.Refund(req)
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +305,10 @@ func TestRefundPathGatedAndRecorded(t *testing.T) {
 	if tr.Purpose != "refund" || tr.DestName == "" {
 		t.Fatalf("refund record: %+v", tr)
 	}
-	if _, err := svc.Refund(payoutReq("0000000000")); err == nil {
+	blocked := payoutReq("0000000000")
+	blocked.IdempotencyKey = "refund-0000000000"
+	blocked.SourceSessionID = src.SessionID
+	if _, err := svc.Refund(blocked); err == nil {
 		t.Fatal("refund must honour the name-enquiry gate")
 	}
 }
