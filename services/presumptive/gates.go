@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 )
 
 // presumptiveGateID is the reg-watch gate gating presumptive collections
@@ -94,6 +96,13 @@ func (g *GateClient) Gates() (map[string]GateState, error) {
 		}
 		// reg-watch unreachable -> local fallback
 	}
+	// B2-#5: board-gate state is authoritative ONLY at reg-watch. In prod a
+	// local file (writable by whoever has fs access) must never substitute —
+	// fail closed rather than risk collections proceeding on a forged/stale
+	// local gate file while the board source is down.
+	if keyx.Prod() {
+		return nil, fmt.Errorf("reg-watch unreachable and profile=prod: refusing local-file gate fallback (fail closed)")
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.localRead()
@@ -131,6 +140,11 @@ func (g *GateClient) Flip(id string, open bool) (GateState, error) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 		}
+	}
+	// B2-#5: no local-file board flips in prod — a flip is a board action and
+	// must go through reg-watch (with authorization_ref) or not happen.
+	if g.base != "" && keyx.Prod() {
+		return GateState{}, fmt.Errorf("reg-watch unavailable in profile=prod: refusing local-file gate flip (fail closed)")
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
