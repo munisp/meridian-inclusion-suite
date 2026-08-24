@@ -39,6 +39,22 @@ func (s *Store) pgPut(coll, id string, v any) error {
 	return err
 }
 
+// pgPutIfAbsent is the atomic INSERT ... ON CONFLICT DO NOTHING backing
+// Store.PutIfAbsent (B3 #7): the (collection, id) PRIMARY KEY is the
+// uniqueness constraint; exactly one concurrent claimant wins.
+func (s *Store) pgPutIfAbsent(coll, id string, b []byte) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO meridian_docs (collection, id, doc) VALUES ($1,$2,$3)
+		 ON CONFLICT (collection, id) DO NOTHING`,
+		coll, id, b)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *Store) pgGet(coll, id string, v any) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
