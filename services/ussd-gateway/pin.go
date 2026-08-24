@@ -12,6 +12,7 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -34,6 +35,7 @@ var pinFormat = regexp.MustCompile(`^\d{4,6}$`)
 // PINRecord is the stored credential state for one MSISDN.
 type PINRecord struct {
 	Hash    string `json:"hash"`
+	Salt    string `json:"salt,omitempty"` // B4-10: per-user random salt; empty = legacy record
 	Strikes int    `json:"strikes"`
 	Locked  bool   `json:"locked"`
 }
@@ -81,10 +83,41 @@ func NewPINManager(store PINStore, bus eventPublisher) *PINManager {
 	return &PINManager{store: store, pepper: keyx.MustKey("USSD_PIN_PEPPER", "dev-pin-pepper-do-not-deploy"), events: bus}
 }
 
+// pinIterations is the iterated-HMAC work factor (B4-10): a USSD PIN is a
+// 4-6 digit number, so a single-pass hash is brute-forced in milliseconds.
+// 10000 HMAC-SHA256 iterations with a per-user random salt raises offline
+// attack cost and defeats cross-user rainbow tables. No new deps.
+const pinIterations = 10000
+
+// hash is the LEGACY single-pass HMAC (kept only to verify pre-B4-10
+// records; they are upgraded to salted+iterated on next successful verify).
 func (m *PINManager) hash(phone, pin string) string {
 	mac := hmac.New(sha256.New, []byte(m.pepper))
 	mac.Write([]byte("ussd-pin:" + phone + ":" + pin))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// hashWithSalt computes iterated HMAC-SHA256: H0 = HMAC(pepper,
+// "ussd-pin:"+salt+":"+pin), Hi = HMAC(pepper, Hi-1), i=1..pinIterations-1.
+func (m *PINManager) hashWithSalt(salt, pin string) string {
+	mac := hmac.New(sha256.New, []byte(m.pepper))
+	mac.Write([]byte("ussd-pin:" + salt + ":" + pin))
+	d := mac.Sum(nil)
+	for i := 1; i < pinIterations; i++ {
+		mac = hmac.New(sha256.New, []byte(m.pepper))
+		mac.Write(d)
+		d = mac.Sum(nil)
+	}
+	return hex.EncodeToString(d)
+}
+
+// newPINSalt returns a 128-bit random salt (hex).
+func newPINSalt() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // crypto/rand failure is unrecoverable for credential storage
+	}
+	return hex.EncodeToString(b)
 }
 
 // HasPIN reports whether the MSISDN has completed PIN setup.
@@ -98,7 +131,8 @@ func (m *PINManager) SetPIN(phone, pin string) error {
 	if !pinFormat.MatchString(pin) {
 		return fmt.Errorf("PIN must be 4-6 digits")
 	}
-	m.store.Put(phone, PINRecord{Hash: m.hash(phone, pin)})
+	salt := newPINSalt()
+	m.store.Put(phone, PINRecord{Hash: m.hashWithSalt(salt, pin), Salt: salt})
 	return nil
 }
 
@@ -113,8 +147,18 @@ func (m *PINManager) Verify(phone, pin string) error {
 	if rec.Locked {
 		return errPINLocked
 	}
-	if hmac.Equal([]byte(rec.Hash), []byte(m.hash(phone, pin))) {
+	want := m.hashWithSalt(rec.Salt, pin)
+	legacy := rec.Salt == ""
+	if legacy {
+		want = m.hash(phone, pin) // pre-B4-10 record
+	}
+	if hmac.Equal([]byte(rec.Hash), []byte(want)) {
 		rec.Strikes = 0
+		if legacy {
+			// transparent upgrade to salted+iterated storage
+			rec.Salt = newPINSalt()
+			rec.Hash = m.hashWithSalt(rec.Salt, pin)
+		}
 		m.store.Put(phone, rec)
 		return nil
 	}

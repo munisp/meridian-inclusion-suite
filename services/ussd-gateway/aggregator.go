@@ -55,9 +55,14 @@ func VerifyAggregatorSignature(signature string, body []byte) bool {
 	return hmac.Equal([]byte(strings.ToLower(signature)), []byte(want))
 }
 
+// msisdnHash pseudonymises an MSISDN for logs/events. B4-9: keyed
+// HMAC-SHA256 — an unsalted SHA-256 of a phone number is dictionary-
+// reversible in seconds (small MSISDN space). Key from
+// USSD_MSISDN_HMAC_KEY; keyx.MustKey fails closed in prod when unset.
 func msisdnHash(phone string) string {
-	sum := sha256.Sum256([]byte("msisdn:" + phone))
-	return hex.EncodeToString(sum[:])[:12]
+	mac := hmac.New(sha256.New, []byte(keyx.MustKey("USSD_MSISDN_HMAC_KEY", "dev-msisdn-hmac-do-not-deploy")))
+	mac.Write([]byte("msisdn:" + phone))
+	return hex.EncodeToString(mac.Sum(nil))[:12]
 }
 
 // AggregatorNotifier is the outbound notify client (delivery receipts,
