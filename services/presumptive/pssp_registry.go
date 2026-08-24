@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
 )
@@ -128,12 +131,57 @@ type OnboardResult struct {
 	WebhookSecret string `json:"webhook_secret"`
 }
 
+// OnboardValidationError marks client-supplied field failures; the HTTP
+// handler maps it to 400 (other onboard errors stay 409).
+type OnboardValidationError struct{ msg string }
+
+func (e *OnboardValidationError) Error() string { return e.msg }
+
+// validateCallbackURL enforces scheme+host and, in prod, refuses non-https
+// and RFC1918/loopback/unspecified targets.
+func validateCallbackURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return &OnboardValidationError{msg: "callback_url must be an absolute URL with scheme and host"}
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return &OnboardValidationError{msg: "callback_url scheme must be http or https"}
+	}
+	if !keyx.Prod() {
+		return nil
+	}
+	if u.Scheme != "https" {
+		return &OnboardValidationError{msg: "callback_url must use https in prod"}
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" {
+		return &OnboardValidationError{msg: "callback_url host must not be loopback in prod"}
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			return &OnboardValidationError{msg: "callback_url host must not be a private/loopback address in prod"}
+		}
+	}
+	return nil
+}
+
 // Onboard registers a PSSP (status sandbox) with a server-generated per-PSSP
 // webhook secret and a per-PSSP keyed simulator adapter.
 func (r *PSSPRegistry) Onboard(in OnboardRequest) (OnboardResult, error) {
 	name := strings.ToLower(strings.TrimSpace(in.Name))
 	if name == "" || in.CallbackURL == "" {
-		return OnboardResult{}, fmt.Errorf("name and callback_url are required")
+		return OnboardResult{}, &OnboardValidationError{msg: "name and callback_url are required"}
+	}
+	// B4-11: the refFmt slice below indexes name[:3] — validate length here
+	// with a client error instead of panicking mid-onboard.
+	if len(name) < 3 {
+		return OnboardResult{}, &OnboardValidationError{msg: "name must be at least 3 characters"}
+	}
+	// B4-12: callback_url must be a well-formed absolute URL; in prod it must
+	// be https and must not target RFC1918/loopback hosts (SSRF / webhook
+	// redirection into internal networks).
+	if err := validateCallbackURL(in.CallbackURL); err != nil {
+		return OnboardResult{}, err
 	}
 	if existing, ok, _ := r.byName(name); ok {
 		return OnboardResult{}, fmt.Errorf("PSSP %q already registered as %s", name, existing.ID)
