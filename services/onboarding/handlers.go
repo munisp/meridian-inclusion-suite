@@ -308,6 +308,13 @@ func (s *server) lookupByNIN(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) verifyNIN(w http.ResponseWriter, r *http.Request) {
+	// B2 #16: NIN verification against NIMC is restricted to back-office
+	// roles with a verified identity (no anonymous/arbitrary-caller lookups).
+	if !backOfficeRole(r) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"nin verification requires admin/operator role")
+		return
+	}
 	var in struct {
 		NIN string `json:"nin"`
 	}
@@ -323,7 +330,28 @@ func (s *server) verifyNIN(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, v)
 }
 
+// backOfficeRole gates statutory identity/provisioning operations to
+// verified back-office roles (B2 #16).
+func backOfficeRole(r *http.Request) bool {
+	for _, role := range httpx.RequestRoles(r) {
+		if role == "admin" || role == "operator" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *server) provisionTIN(w http.ResponseWriter, r *http.Request) {
+	// B2 #16: TIN provisioning is a back-office operation. The caller must
+	// hold a verified admin/operator role; the operator record must exist
+	// and the supplied NIN must MATCH the registered NIN hash (ownership —
+	// no provisioning a TIN against an arbitrary NIN for an arbitrary
+	// operator_id).
+	if !backOfficeRole(r) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"tin provisioning requires admin/operator role")
+		return
+	}
 	var in struct {
 		OperatorID string `json:"operator_id"`
 		NIN        string `json:"nin"`
@@ -336,6 +364,20 @@ func (s *server) provisionTIN(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, http.StatusBadRequest, "validation", "operator_id and nin are required")
 		return
 	}
+	op, found, err := s.registry.Get(in.OperatorID)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	if !found {
+		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "operator not found")
+		return
+	}
+	if op.NINHash != NINHash(in.NIN) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"nin does not match the operator's registered identity")
+		return
+	}
 	run := s.workflows.TINProvision(in.OperatorID, in.NIN)
 	if run.Status == "failed" {
 		httpx.WriteProblem(w, http.StatusUnprocessableEntity, "workflow_failed", run.Error)
@@ -345,6 +387,12 @@ func (s *server) provisionTIN(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) verifyTIN(w http.ResponseWriter, r *http.Request) {
+	// B2 #16: TIN verification is restricted to back-office roles.
+	if !backOfficeRole(r) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"tin verification requires admin/operator role")
+		return
+	}
 	var in struct {
 		TIN string `json:"tin"`
 	}
@@ -611,11 +659,18 @@ func (s *server) onboardingStatus(w http.ResponseWriter, r *http.Request) {
 
 // --- review queue / approval workflow (O4) ---
 
-// reviewerRoleAllowed gates approve/reject to back-office roles. Dev mode
-// reads X-Dev-Role; keycloak mode would map realm roles (admin|operator).
+// reviewerRoleAllowed gates approve/reject to back-office roles. B2 #6:
+// roles come from the verified JWT (authx-stamped X-Meridian-Roles in
+// keycloak mode; dev X-Dev-Role / HS256 roles claim in dev mode via
+// httpx.RequestRoles) — a raw client-supplied X-Dev-Role is never read
+// here, and read-only auditor cannot approve.
 func reviewerRoleAllowed(r *http.Request) bool {
-	role := r.Header.Get("X-Dev-Role")
-	return role == "admin" || role == "operator" || role == "auditor"
+	for _, role := range httpx.RequestRoles(r) {
+		if role == "admin" || role == "operator" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
@@ -643,11 +698,19 @@ func (s *server) reviewDecision(w http.ResponseWriter, r *http.Request, approve 
 		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "operator not found")
 		return
 	}
+	reviewer := httpx.CallerIdentity(r)
+	// B2 #18 (SoD): the reviewer must not be the agent who captured/created
+	// the operator record — no self-approval of one's own onboarding.
+	if reviewer != "" && op.AgentID != "" && reviewer == op.AgentID {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"reviewer must differ from the capturing agent (segregation of duties)")
+		return
+	}
 	if approve {
 		op.ReviewStatus = "approved"
 		if op.Status == "pending_review" {
 			// approved -> back to registered so the provision workflow can proceed
-			if err := s.registry.Transition(&op, "registered", "review:"+httpx.RequestIdentity(r)); err != nil {
+			if err := s.registry.Transition(&op, "registered", "review:"+reviewer); err != nil {
 				httpx.WriteProblem(w, http.StatusConflict, "illegal_transition", err.Error())
 				return
 			}
@@ -655,7 +718,7 @@ func (s *server) reviewDecision(w http.ResponseWriter, r *http.Request, approve 
 	} else {
 		op.ReviewStatus = "rejected"
 		if op.Status != "rejected" {
-			if err := s.registry.Transition(&op, "rejected", "review:"+httpx.RequestIdentity(r)); err != nil {
+			if err := s.registry.Transition(&op, "rejected", "review:"+reviewer); err != nil {
 				httpx.WriteProblem(w, http.StatusConflict, "illegal_transition", err.Error())
 				return
 			}
@@ -670,7 +733,7 @@ func (s *server) reviewDecision(w http.ResponseWriter, r *http.Request, approve 
 		event = "nrs.onb.review.rejected.v1"
 	}
 	s.workflows.bus.Publish(event, events.New(event, serviceName, "", "", map[string]any{
-		"operator_id": op.ID, "reviewer": httpx.RequestIdentity(r),
+		"operator_id": op.ID, "reviewer": reviewer,
 	}))
 	httpx.WriteJSON(w, http.StatusOK, op)
 }

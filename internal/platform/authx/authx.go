@@ -283,11 +283,31 @@ const ClaimsKey = "X-Meridian-Caller"
 // comma-joined roles (mirrors ClaimsKey for the subject).
 const RolesKey = "X-Meridian-Roles"
 
+// identityHeaders are request headers that carry authentication/identity
+// meaning inside the platform. They are ONLY ever set by this middleware
+// (from a verified token) — never accepted from the client. B2 #6: strip
+// them inbound on EVERY path (including public paths) so a forged
+// X-Meridian-Roles / X-Dev-Role cannot reach a handler.
+var identityHeaders = []string{
+	ClaimsKey, RolesKey,
+	"X-Dev-Role", "X-Dev-Subject", "X-Dev-Agent-Id",
+}
+
+// StripIdentityHeaders removes inbound client-supplied identity headers.
+func StripIdentityHeaders(r *http.Request) {
+	for _, h := range identityHeaders {
+		r.Header.Del(h)
+	}
+}
+
 // Middleware returns §1.3 auth middleware for AUTH_MODE=keycloak. publicPath
 // bypasses auth exactly like the dev verifier.
 func Middleware(v *Verifier, publicPath func(string) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// B2 #6: never trust client-supplied identity headers — they are
+			// re-stamped from the verified token below (or stay empty).
+			StripIdentityHeaders(r)
 			if publicPath != nil && publicPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
