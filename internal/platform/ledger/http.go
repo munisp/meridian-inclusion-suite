@@ -80,7 +80,10 @@ func (h *HTTPClient) PostPending(pendingID string, amount uint64) (string, error
 // (idempotent replay semantics live server-side; see core ledger service).
 func (h *HTTPClient) PostPendingAs(pendingID, postID string, amount uint64) (string, error) {
 	var out transferResp
-	err := h.do(http.MethodPost, "/v1/transfers/"+pendingID+"/post", map[string]any{"amount": amount, "post_id": postID}, &out)
+	// B3 #13: the core ledger post contract is amount_kobo (0 => full
+	// pending amount). Sending "amount" was silently decoded as 0, making
+	// any partial capture post the FULL hold.
+	err := h.do(http.MethodPost, "/v1/transfers/"+pendingID+"/post", map[string]any{"amount_kobo": amount, "post_id": postID}, &out)
 	return firstID(out), err
 }
 
