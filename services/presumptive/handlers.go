@@ -112,13 +112,13 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/bands/evaluate", s.evaluateBand)
 	mux.HandleFunc("GET /v1/packs", s.listPacks)
 
-	// payments
-	mux.HandleFunc("POST /v1/payments/intent", s.createIntent)
+	// payments — B4-2 repair: money-moving lifecycle is operator/admin-only
+	mux.HandleFunc("POST /v1/payments/intent", requireRole(s.createIntent, "operator", "admin"))
 	mux.HandleFunc("GET /v1/payments", s.listPayments)
 	mux.HandleFunc("GET /v1/payments/{id}", s.getPayment)
-	mux.HandleFunc("POST /v1/payments/{id}/authorise", s.authorisePayment)
-	mux.HandleFunc("POST /v1/payments/{id}/capture", s.capturePayment)
-	mux.HandleFunc("POST /v1/payments/{id}/void", s.voidPayment)
+	mux.HandleFunc("POST /v1/payments/{id}/authorise", requireRole(s.authorisePayment, "operator", "admin"))
+	mux.HandleFunc("POST /v1/payments/{id}/capture", requireRole(s.capturePayment, "operator", "admin"))
+	mux.HandleFunc("POST /v1/payments/{id}/void", requireRole(s.voidPayment, "operator", "admin"))
 
 	// PSSP webhooks (public but per-PSSP HMAC-signed)
 	mux.HandleFunc("POST /v1/pssp/webhook/{provider}", s.psspWebhook)
@@ -151,7 +151,7 @@ func (s *server) routes() *http.ServeMux {
 
 	// workflows
 	mux.HandleFunc("GET /v1/workflows", s.listWorkflows)
-	mux.HandleFunc("POST /v1/workflows/{name}/trigger", s.triggerWorkflow)
+	mux.HandleFunc("POST /v1/workflows/{name}/trigger", requireRole(s.triggerWorkflow, "admin"))
 	mux.HandleFunc("GET /v1/workflows/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/simulations", s.listSimulations)
 

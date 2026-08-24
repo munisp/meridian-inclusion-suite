@@ -106,3 +106,54 @@ func TestMoneyRoutes_OperatorAndAdminAllowed(t *testing.T) {
 		}
 	}
 }
+
+// Regression (B4-2 repair, V2 round): the PRIMARY payment lifecycle routes
+// and the workflow trigger were left ungated by the original B4-2 fix —
+// an auditor token reached intent/authorise/capture/void (money movement
+// via PSSP adapter) and could trigger arbitrary workflows. Pin the gates:
+// operator/admin on the payment lifecycle, admin-only on workflow trigger.
+
+func TestPaymentLifecycleRoutes_ForbidAuditor(t *testing.T) {
+	h := authzTestHandler(t)
+	routes := []struct{ method, path, body string }{
+		{"POST", "/v1/payments/intent", `{"amount":1000,"currency":"NGN"}`},
+		{"POST", "/v1/payments/p1/authorise", `{}`},
+		{"POST", "/v1/payments/p1/capture", `{}`},
+		{"POST", "/v1/payments/p1/void", `{}`},
+	}
+	for _, rt := range routes {
+		if code := doReq(t, h, rt.method, rt.path, "auditor", rt.body); code != http.StatusForbidden {
+			t.Errorf("auditor %s %s = %d, want 403", rt.method, rt.path, code)
+		}
+	}
+}
+
+func TestPaymentLifecycleRoutes_OperatorAllowed(t *testing.T) {
+	h := authzTestHandler(t)
+	routes := []struct{ method, path, body string }{
+		{"POST", "/v1/payments/intent", `{"amount":1000,"currency":"NGN"}`},
+		{"POST", "/v1/payments/p1/authorise", `{}`},
+		{"POST", "/v1/payments/p1/capture", `{}`},
+		{"POST", "/v1/payments/p1/void", `{}`},
+	}
+	for _, rt := range routes {
+		code := doReq(t, h, rt.method, rt.path, "operator", rt.body)
+		if code == http.StatusUnauthorized || code == http.StatusForbidden {
+			t.Errorf("operator %s %s = %d, want handler to run (not 401/403)", rt.method, rt.path, code)
+		}
+	}
+}
+
+func TestWorkflowTrigger_AdminOnly(t *testing.T) {
+	h := authzTestHandler(t)
+	for _, role := range []string{"auditor", "operator"} {
+		if code := doReq(t, h, "POST", "/v1/workflows/w1/trigger", role, `{}`); code != http.StatusForbidden {
+			t.Errorf("%s workflow trigger = %d, want 403", role, code)
+		}
+	}
+	// admin passes the role gate (handler may then 400/404/503 on fixtures)
+	code := doReq(t, h, "POST", "/v1/workflows/w1/trigger", "admin", `{}`)
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		t.Errorf("admin workflow trigger = %d, want handler to run", code)
+	}
+}
