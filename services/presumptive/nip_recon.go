@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
 
@@ -45,6 +47,13 @@ type NIPTransfer struct {
 	// RequestHash binds the idempotency key to the exact request payload;
 	// a retry with the same key but a different payload is rejected.
 	RequestHash string `json:"request_hash,omitempty"`
+	// SourceSessionID (refunds only): the successful prior payout this
+	// refund is bound to (B3 #4).
+	SourceSessionID string `json:"source_session_id,omitempty"`
+	// LedgerPendingID is the deterministic pending ledger leg created
+	// BEFORE the rail dispatch (B3 #4): posted on success, voided on
+	// failure, resolved by the TSQ sweeper after a crash.
+	LedgerPendingID string `json:"ledger_pending_id,omitempty"`
 	// ExpiresAt bounds the idempotency replay window (default 7 days,
 	// assurance R4 item 2). After expiry a reused key is treated as new;
 	// the TSQ sweeper purges expired records only in terminal state.
@@ -78,6 +87,7 @@ type NIPService struct {
 	rail               NIPRail
 	st                 *store.Store
 	bus                events.Bus
+	lc                 ledger.Client // core ledger for the money leg (B3 #4)
 	requireNameEnquiry bool
 	mu                 sync.Mutex // serializes payout idempotency check+put
 }
@@ -86,6 +96,13 @@ type NIPService struct {
 // built via NewNIPServiceFromEnv.
 func NewNIPService(rail NIPRail, st *store.Store, bus events.Bus, requireNameEnquiry bool) *NIPService {
 	return &NIPService{rail: rail, st: st, bus: bus, requireNameEnquiry: requireNameEnquiry}
+}
+
+// WithLedger attaches the core ledger client used to book the double-entry
+// leg for every payout/refund (B3 #4). Chainable.
+func (s *NIPService) WithLedger(lc ledger.Client) *NIPService {
+	s.lc = lc
+	return s
 }
 
 // NewNIPServiceFromEnv builds the rail (fail-closed) and service from env.
@@ -177,12 +194,25 @@ type PayoutRequest struct {
 	DestBankCode   string `json:"dest_bank_code"`
 	Narration      string `json:"narration"`
 	IdempotencyKey string `json:"idempotency_key"` // required: caller-stable retry key
+	// SourceSessionID binds a refund to the successful prior payout it
+	// returns value for (B3 #4). Required on the refund path; ignored for
+	// ordinary payouts.
+	SourceSessionID string `json:"source_session_id,omitempty"`
 }
 
 // Payout executes a NIP funds transfer with the MANDATORY
 // name-enquiry-before-transfer hook. Idempotent on IdempotencyKey: a retry
 // returns the original transfer record with its original session id.
 func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
+	if req.Purpose == "" {
+		req.Purpose = "payout"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.payoutLocked(req)
+}
+
+func (s *NIPService) payoutLocked(req PayoutRequest) (NIPTransfer, error) {
 	if req.AmountKobo == 0 || req.DestAccount == "" || req.DestBankCode == "" {
 		return NIPTransfer{}, fmt.Errorf("amount_kobo, dest_account and dest_bank_code are required")
 	}
@@ -192,8 +222,6 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	if req.Purpose == "" {
 		req.Purpose = "payout"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	reqHash := payoutRequestHash(req)
 	// idempotent retry: same key -> same record (and same session id on the
 	// rail). An in_flight record is returned as-is (the TSQ sweeper resolves
@@ -218,16 +246,17 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	}
 
 	t := NIPTransfer{
-		ID:             ids.WithPrefix("nip"),
-		IdempotencyKey: req.IdempotencyKey,
-		Purpose:        req.Purpose,
-		AmountKobo:     req.AmountKobo,
-		DestAccount:    req.DestAccount,
-		DestBankCode:   req.DestBankCode,
-		Narration:      req.Narration,
-		ExpiresAt:      time.Now().Add(nipIdempotencyTTL).UTC().Format(time.RFC3339),
-		CreatedAt:      nowRFC3339(),
-		UpdatedAt:      nowRFC3339(),
+		ID:              ids.WithPrefix("nip"),
+		IdempotencyKey:  req.IdempotencyKey,
+		Purpose:         req.Purpose,
+		SourceSessionID: req.SourceSessionID,
+		AmountKobo:      req.AmountKobo,
+		DestAccount:     req.DestAccount,
+		DestBankCode:    req.DestBankCode,
+		Narration:       req.Narration,
+		ExpiresAt:       time.Now().Add(nipIdempotencyTTL).UTC().Format(time.RFC3339),
+		CreatedAt:       nowRFC3339(),
+		UpdatedAt:       nowRFC3339(),
 	}
 
 	// MANDATORY name-enquiry-before-transfer gate.
@@ -258,6 +287,13 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	if err := s.st.Put("nip_transfers", t.SessionID, t); err != nil {
 		return NIPTransfer{}, fmt.Errorf("persist pre-dispatch record: %w", err)
 	}
+	// B3 #4: durable double-entry pending leg BEFORE the rail dispatch
+	// (deterministic id). Posted on success, voided on outright failure,
+	// resolved by the TSQ sweeper if the process crashes in between.
+	if err := s.ledgerPendingLeg(&t); err != nil {
+		return NIPTransfer{}, fmt.Errorf("ledger pending leg: %w", err)
+	}
+	s.put(t)
 	res, err := s.rail.FundsTransfer(NIPTransferRequest{
 		SessionID:      t.SessionID,
 		AmountKobo:     t.AmountKobo,
@@ -279,6 +315,15 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	t.Status = res.Status
 	t.Detail = res.Detail
 	t.UpdatedAt = nowRFC3339()
+	// settle the ledger leg with the rail outcome (B3 #4)
+	switch res.Status {
+	case NIPStatusSuccess:
+		if err := s.postLedgerLeg(&t); err != nil {
+			return t, fmt.Errorf("ledger post leg: %w", err)
+		}
+	case NIPStatusFailed:
+		s.voidLedgerLeg(&t)
+	}
 	if err := s.st.Put("nip_transfers", "idem:"+t.IdempotencyKey, t); err != nil {
 		return t, fmt.Errorf("update transfer record: %w", err)
 	}
@@ -289,12 +334,67 @@ func (s *NIPService) Payout(req PayoutRequest) (NIPTransfer, error) {
 	return t, nil
 }
 
+// nsNIPClearing is the ledger-200 namespace of the NIP outbound clearing
+// account (funds dispatched over the rail). Payout/refund leg:
+// debit PSM collections -> credit NIP clearing.
+const nsNIPClearing uint64 = 200000200001
+
+// ledgerPendingLeg creates the deterministic pending ledger leg for t.
+// No-op when no ledger client is attached (dev-only wiring; the production
+// routes in handlers.go always attach one).
+func (s *NIPService) ledgerPendingLeg(t *NIPTransfer) error {
+	if s.lc == nil {
+		return nil
+	}
+	cols := ledger.AccountID(nsPSMCollections, 1)
+	clr := ledger.AccountID(nsNIPClearing, 1)
+	for _, a := range []ledger.Account{
+		{ID: cols, Ledger: ledger.LedgerPSMPayments, Code: 2, UserData: "nrs-psm-collections"},
+		{ID: clr, Ledger: ledger.LedgerPSMPayments, Code: 6, UserData: "nrs-nip-clearing"},
+	} {
+		if err := s.lc.CreateAccounts([]ledger.Account{a}); err != nil && err != ledger.ErrAccountExists {
+			return err
+		}
+	}
+	pendID := ledger.DeterministicTransferID("nipled:" + t.SessionID)
+	if _, err := s.lc.PendingTransfer(ledger.Transfer{
+		ID: pendID, DebitAccountID: cols, CreditAccountID: clr,
+		Ledger: ledger.LedgerPSMPayments, Code: 6, Amount: t.AmountKobo,
+		Pending: true, UserData: "nip:" + t.Purpose + ":" + t.SessionID}); err != nil {
+		return err
+	}
+	t.LedgerPendingID = pendID
+	return nil
+}
+
+// postLedgerLeg posts the pending leg after rail success (idempotent via
+// deterministic post id).
+func (s *NIPService) postLedgerLeg(t *NIPTransfer) error {
+	if s.lc == nil || t.LedgerPendingID == "" {
+		return nil
+	}
+	_, err := s.lc.PostPendingAs(t.LedgerPendingID,
+		ledger.DeterministicTransferID("nippost:"+t.SessionID), t.AmountKobo)
+	return err
+}
+
+// voidLedgerLeg voids the pending leg after rail failure (best effort,
+// logged — the transfer record retains LedgerPendingID for forensics).
+func (s *NIPService) voidLedgerLeg(t *NIPTransfer) {
+	if s.lc == nil || t.LedgerPendingID == "" {
+		return
+	}
+	if _, err := s.lc.VoidPending(t.LedgerPendingID); err != nil {
+		log.Printf("nip ledger leg void %s: %v", t.SessionID, err)
+	}
+}
+
 // payoutRequestHash binds an idempotency key to the payload it first
 // carried, so a key reused with different parameters is rejected instead of
 // silently returning an unrelated transfer.
 func payoutRequestHash(req PayoutRequest) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
-		req.Purpose, req.IdempotencyKey, fmt.Sprint(req.AmountKobo), req.DestAccount, req.DestBankCode, req.Narration,
+		req.Purpose, req.IdempotencyKey, fmt.Sprint(req.AmountKobo), req.DestAccount, req.DestBankCode, req.Narration, req.SourceSessionID,
 	}, "|")))
 	return fmt.Sprintf("%x", sum[:16])
 }
@@ -302,9 +402,66 @@ func payoutRequestHash(req PayoutRequest) string {
 // Refund sends value back for a SUCCESSFUL prior transfer. Per CBN rules a
 // refund is a NEW transfer (commercial return of value); Reversal() below is
 // only for failed/errored rail transactions. The name-enquiry gate applies.
+//
+// ErrRefundDestMismatch is returned when the caller supplies a refund
+// destination that differs from the source payout's destination account.
+var ErrRefundDestMismatch = fmt.Errorf("refund destination not bound to source payout")
+
 func (s *NIPService) Refund(req PayoutRequest) (NIPTransfer, error) {
 	req.Purpose = "refund"
-	return s.Payout(req)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// B3 #4: a refund must be bound to a SUCCESSFUL prior payout, and the
+	// cumulative refunds against that payout can never exceed its amount.
+	if req.SourceSessionID == "" {
+		return NIPTransfer{}, fmt.Errorf("source_session_id is required: a refund returns value for a successful prior payout")
+	}
+	src, ok, err := s.getBySession(req.SourceSessionID)
+	if err != nil {
+		return NIPTransfer{}, fmt.Errorf("source transfer lookup: %w", err)
+	}
+	if !ok {
+		return NIPTransfer{}, fmt.Errorf("source transfer %s not found: refund rejected", tail4(req.SourceSessionID))
+	}
+	if src.Purpose != "payout" {
+		return NIPTransfer{}, fmt.Errorf("source transfer %s is a %s, not a payout: refund rejected", tail4(req.SourceSessionID), src.Purpose)
+	}
+	if src.Status != NIPStatusSuccess {
+		return NIPTransfer{}, fmt.Errorf("source transfer %s is %s, not success: refund rejected", tail4(req.SourceSessionID), src.Status)
+	}
+	// B3 #4 repair (V2 round): the refund destination is BOUND to the source
+	// payout's destination account — value returns only to the account the
+	// original payout moved value to. A caller-supplied dest that differs is
+	// rejected: an attacker could otherwise refund a victim's payout into
+	// their own account (theft-shaped hole confirmed by adversarial test).
+	if req.DestAccount != "" && req.DestAccount != src.DestAccount {
+		return NIPTransfer{}, fmt.Errorf("%w: dest_account does not match the source payout's destination account", ErrRefundDestMismatch)
+	}
+	if req.DestBankCode != "" && req.DestBankCode != src.DestBankCode {
+		return NIPTransfer{}, fmt.Errorf("%w: dest_bank_code does not match the source payout's destination bank", ErrRefundDestMismatch)
+	}
+	req.DestAccount = src.DestAccount
+	req.DestBankCode = src.DestBankCode
+	var all []NIPTransfer
+	if err := s.st.List("nip_transfers", &all); err != nil {
+		return NIPTransfer{}, fmt.Errorf("refund history lookup: %w", err)
+	}
+	var refunded uint64
+	seen := map[string]bool{}
+	for _, t := range all {
+		if t.Purpose == "refund" && t.SourceSessionID == req.SourceSessionID && !seen[t.SessionID] {
+			seen[t.SessionID] = true
+			// only value actually moved (or possibly moved) counts
+			if t.Status == NIPStatusSuccess || t.Status == NIPStatusInFlight {
+				refunded += t.AmountKobo
+			}
+		}
+	}
+	if refunded+req.AmountKobo > src.AmountKobo {
+		return NIPTransfer{}, fmt.Errorf("refund cap exceeded: %d already refunded + %d requested > original payout %d",
+			refunded, req.AmountKobo, src.AmountKobo)
+	}
+	return s.payoutLocked(req)
 }
 
 // Reversal unwinds a failed or in-flight-resolved-failed transfer at the
@@ -371,11 +528,17 @@ func (s *NIPService) SweepTSQ() (int, error) {
 		case NIPStatusSuccess:
 			t.Status = NIPStatusSuccess
 			t.UpdatedAt = nowRFC3339()
+			if err := s.postLedgerLeg(&t); err != nil {
+				log.Printf("nip tsq sweeper: ledger post %s: %v (leaving for next sweep)", t.SessionID, err)
+				continue
+			}
 			s.put(t)
 			s.publish(&t)
 			resolved++
 		case NIPStatusFailed:
-			// CBN failed-transaction auto-reversal path
+			// CBN failed-transaction auto-reversal path; the pending ledger
+			// leg is voided — no value moved.
+			s.voidLedgerLeg(&t)
 			if _, err := s.Reversal(t.SessionID, "tsq-resolved-failed (auto-reversal)"); err != nil {
 				log.Printf("nip tsq sweeper: auto-reversal %s: %v", t.SessionID, err)
 				continue
@@ -505,6 +668,10 @@ func (h nipHTTP) refund(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := h.svc.Refund(in)
 	if err != nil {
+		if errors.Is(err, ErrRefundDestMismatch) {
+			httpx.WriteProblem(w, http.StatusBadRequest, "refund_dest_mismatch", err.Error())
+			return
+		}
 		httpx.WriteProblem(w, http.StatusUnprocessableEntity, "refund_blocked", err.Error())
 		return
 	}

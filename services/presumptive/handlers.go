@@ -79,6 +79,9 @@ func (s *server) nipRoutes(mux *http.ServeMux) {
 			// reuse the payment service's durable store for transfer records
 			s.nip, s.nipErr = NewNIPServiceFromEnv(s.pay.st, s.bus)
 			if s.nipErr == nil {
+				s.nip.WithLedger(s.pay.lc) // B3 #4: book the money leg
+			}
+			if s.nipErr == nil {
 				s.nip.StartTSQSweeper(nipSweepInterval(), make(chan struct{}))
 			}
 		})
