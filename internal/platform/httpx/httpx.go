@@ -257,6 +257,12 @@ func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
 	log.Printf("profile=dev component=auth")
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// B2 #6: X-Meridian-Caller/Roles are only ever stamped by the
+			// authx keycloak middleware from a verified token; in dev mode
+			// that middleware does not run, so strip any client-forged
+			// copies on every path (incl. public paths).
+			r.Header.Del("X-Meridian-Caller")
+			r.Header.Del("X-Meridian-Roles")
 			if publicPath != nil && publicPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
