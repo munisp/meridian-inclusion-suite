@@ -104,6 +104,37 @@ func (s *Store) Put(coll, id string, v any) error {
 	return s.persistLocked()
 }
 
+// PutIfAbsent inserts a document only when (collection, id) is unused
+// (B3 #7: atomic check-then-act for idempotency claims; mirrors the
+// PutIfAbsent precedent in core packages/events/store). Returns false
+// when the key already exists. Backed by the PRIMARY KEY +
+// INSERT ... ON CONFLICT DO NOTHING in Postgres and by the store mutex
+// in the embedded backend.
+func (s *Store) PutIfAbsent(coll, id string, v any) (bool, error) {
+	if err := s.fault("put", coll, id); err != nil {
+		return false, err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return false, err
+	}
+	if s.pool != nil {
+		return s.pgPutIfAbsent(coll, id, b)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data[coll] != nil {
+		if _, ok := s.data[coll][id]; ok {
+			return false, nil
+		}
+	}
+	if s.data[coll] == nil {
+		s.data[coll] = map[string]json.RawMessage{}
+	}
+	s.data[coll][id] = b
+	return true, s.persistLocked()
+}
+
 func (s *Store) Get(coll, id string, v any) (bool, error) {
 	if err := s.fault("get", coll, id); err != nil {
 		return false, err

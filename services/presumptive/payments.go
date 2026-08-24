@@ -207,20 +207,69 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 		return Payment{}, fmt.Errorf("tin_hash and state are required")
 	}
 	reqHash := ""
+	claimed := false
 	if in.IdempotencyKey != "" {
 		reqHash = intentRequestHash(in)
-		pid, err := s.lookupIdempotency(in.IdempotencyKey, reqHash)
-		if err != nil {
-			return Payment{}, err // ErrIdempotencyConflict -> 409
+		// B3 #7: ATOMIC claim of the idempotency key BEFORE any ledger hold
+		// (PutIfAbsent; unique (collection,id) constraint in pg). The old
+		// check-then-act let two concurrent same-key requests each create a
+		// payment and a pending hold. The claim record starts with an empty
+		// PaymentID ("in progress") and is completed after the payment is
+		// durably written; a crashed claim is released on the error paths.
+		claim := IdempotencyRecord{
+			Key: in.IdempotencyKey, CreatedAt: nowRFC3339(), RequestHash: reqHash,
+			ExpiresAt: time.Now().Add(idempotencyTTL).UTC().Format(time.RFC3339),
 		}
-		if pid != "" {
-			p, found, err := s.get(pid)
-			if err == nil && found {
-				return p, nil // idempotent replay (200)
+		for attempt := 0; ; attempt++ {
+			won, err := s.st.PutIfAbsent("idempotency", in.IdempotencyKey, claim)
+			if err != nil {
+				return Payment{}, fmt.Errorf("idempotency claim: %w", err)
+			}
+			if won {
+				claimed = true
+				break
+			}
+			var rec IdempotencyRecord
+			ok, err := s.st.Get("idempotency", in.IdempotencyKey, &rec)
+			if err != nil {
+				return Payment{}, fmt.Errorf("idempotency lookup: %w", err)
+			}
+			if ok && rec.recordExpired(time.Now()) && attempt == 0 {
+				// expired claim: delete and re-claim exactly once
+				if _, err := s.st.Delete("idempotency", in.IdempotencyKey); err != nil {
+					return Payment{}, fmt.Errorf("idempotency expiry: %w", err)
+				}
+				continue
+			}
+			if ok && rec.RequestHash != "" && rec.RequestHash != reqHash {
+				return Payment{}, ErrIdempotencyConflict
+			}
+			if ok && rec.PaymentID == "" {
+				// a concurrent/crashed request holds the claim: never create
+				// a second hold — the client retries and replays.
+				return Payment{}, fmt.Errorf("%w: request in progress; safe to retry", ErrIdempotencyConflict)
+			}
+			if ok {
+				p, found, err := s.get(rec.PaymentID)
+				if err == nil && found {
+					return p, nil // idempotent replay (200)
+				}
+			}
+			if attempt > 0 {
+				return Payment{}, fmt.Errorf("idempotency claim race; safe to retry")
 			}
 		}
 	}
+	// releaseClaim frees a claimed-but-uncompleted idempotency key on any
+	// failure path so a client retry can proceed.
+	releaseClaim := func() {
+		if claimed {
+			_, _ = s.st.Delete("idempotency", in.IdempotencyKey)
+			claimed = false
+		}
+	}
 	if _, err := s.hub.Adapter(in.Provider); err != nil {
+		releaseClaim()
 		return Payment{}, err
 	}
 	if in.Period == "" {
@@ -228,9 +277,11 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	}
 	eval := s.engine.Evaluate(in.State, in.TradeCategory, in.AnnualTurnoverKobo, false, 0)
 	if eval.Exempt {
+		releaseClaim()
 		return Payment{}, fmt.Errorf("operator is exempt from presumptive levy: %s", eval.ExemptReason)
 	}
 	if eval.Graduate {
+		releaseClaim()
 		return Payment{}, fmt.Errorf("turnover above presumptive ceiling: route to standard regime (MBS)")
 	}
 	amount := eval.AnnualLevyKobo
@@ -239,15 +290,18 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	}
 	amount += eval.AdminFeeKobo
 	if amount == 0 {
+		releaseClaim()
 		return Payment{}, fmt.Errorf("computed levy is zero; nothing to collect")
 	}
 
 	payer, err := s.payerAccountID(in.TINHash)
 	if err != nil {
+		releaseClaim()
 		return Payment{}, err
 	}
 	collections, err := s.collectionsAccountID()
 	if err != nil {
+		releaseClaim()
 		return Payment{}, err
 	}
 	p := Payment{
@@ -278,18 +332,27 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 		UserData:        "psm-intent:" + p.ID,
 	})
 	if err != nil {
+		releaseClaim()
 		return Payment{}, fmt.Errorf("pending transfer: %w", err)
 	}
 	p.PendingTransferID = ptID
 	p.Status = "pending_authorisation"
 	if err := s.st.Put("payments", p.ID, p); err != nil {
+		releaseClaim()
 		return Payment{}, err
 	}
 	if in.IdempotencyKey != "" {
-		_ = s.st.Put("idempotency", in.IdempotencyKey, IdempotencyRecord{
+		// complete the claim: bind the key to the created payment
+		if err := s.st.Put("idempotency", in.IdempotencyKey, IdempotencyRecord{
 			Key: in.IdempotencyKey, PaymentID: p.ID, CreatedAt: nowRFC3339(), RequestHash: reqHash,
 			ExpiresAt: time.Now().Add(idempotencyTTL).UTC().Format(time.RFC3339),
-		})
+		}); err != nil {
+			// The payment and its hold are durable; the in-progress claim is
+			// RETAINED (never released) so a retry can never create a second
+			// hold — it 409s until the claim TTL expires or ops completes it.
+			return p, fmt.Errorf("complete idempotency claim: %w", err)
+		}
+		claimed = false
 	}
 	s.bus.Publish("nrs.psm.payments.v1", events.New("nrs.psm.payments.v1", serviceName, "", p.RulePackVersion, map[string]any{
 		"payment_id": p.ID, "status": p.Status, "amount_kobo": p.AmountKobo, "tin_hash": p.TINHash, "band": p.TurnoverBand,
