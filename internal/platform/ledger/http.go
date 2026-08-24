@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -111,10 +112,15 @@ func firstID(r transferResp) string {
 }
 
 // NewClientFromEnv returns an HTTPClient when LEDGER_URL is set, otherwise the
-// dev in-memory TigerBeetle-semantics client (§1.5 fallback).
+// dev in-memory TigerBeetle-semantics client (§1.5 fallback). PROFILE=prod
+// refuses to boot without LEDGER_URL: the volatile in-mem dev ledger would
+// silently lose all financial state on restart (V2 round, B3 #4 repair).
 func NewClientFromEnv() Client {
 	if u := os.Getenv("LEDGER_URL"); u != "" {
 		return NewHTTPClient(u)
+	}
+	if os.Getenv("PROFILE") == "prod" {
+		log.Fatal("PROFILE=prod requires LEDGER_URL: refusing to boot with the volatile in-memory dev ledger")
 	}
 	return NewDevClient()
 }

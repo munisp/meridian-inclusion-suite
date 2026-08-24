@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -401,6 +402,11 @@ func payoutRequestHash(req PayoutRequest) string {
 // Refund sends value back for a SUCCESSFUL prior transfer. Per CBN rules a
 // refund is a NEW transfer (commercial return of value); Reversal() below is
 // only for failed/errored rail transactions. The name-enquiry gate applies.
+//
+// ErrRefundDestMismatch is returned when the caller supplies a refund
+// destination that differs from the source payout's destination account.
+var ErrRefundDestMismatch = fmt.Errorf("refund destination not bound to source payout")
+
 func (s *NIPService) Refund(req PayoutRequest) (NIPTransfer, error) {
 	req.Purpose = "refund"
 	s.mu.Lock()
@@ -423,6 +429,19 @@ func (s *NIPService) Refund(req PayoutRequest) (NIPTransfer, error) {
 	if src.Status != NIPStatusSuccess {
 		return NIPTransfer{}, fmt.Errorf("source transfer %s is %s, not success: refund rejected", tail4(req.SourceSessionID), src.Status)
 	}
+	// B3 #4 repair (V2 round): the refund destination is BOUND to the source
+	// payout's destination account — value returns only to the account the
+	// original payout moved value to. A caller-supplied dest that differs is
+	// rejected: an attacker could otherwise refund a victim's payout into
+	// their own account (theft-shaped hole confirmed by adversarial test).
+	if req.DestAccount != "" && req.DestAccount != src.DestAccount {
+		return NIPTransfer{}, fmt.Errorf("%w: dest_account does not match the source payout's destination account", ErrRefundDestMismatch)
+	}
+	if req.DestBankCode != "" && req.DestBankCode != src.DestBankCode {
+		return NIPTransfer{}, fmt.Errorf("%w: dest_bank_code does not match the source payout's destination bank", ErrRefundDestMismatch)
+	}
+	req.DestAccount = src.DestAccount
+	req.DestBankCode = src.DestBankCode
 	var all []NIPTransfer
 	if err := s.st.List("nip_transfers", &all); err != nil {
 		return NIPTransfer{}, fmt.Errorf("refund history lookup: %w", err)
@@ -649,6 +668,10 @@ func (h nipHTTP) refund(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := h.svc.Refund(in)
 	if err != nil {
+		if errors.Is(err, ErrRefundDestMismatch) {
+			httpx.WriteProblem(w, http.StatusBadRequest, "refund_dest_mismatch", err.Error())
+			return
+		}
 		httpx.WriteProblem(w, http.StatusUnprocessableEntity, "refund_blocked", err.Error())
 		return
 	}
