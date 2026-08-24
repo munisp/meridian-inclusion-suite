@@ -338,6 +338,16 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	p.PendingTransferID = ptID
 	p.Status = "pending_authorisation"
 	if err := s.st.Put("payments", p.ID, p); err != nil {
+		// V2 repair (B3 #7 residual): the hold landed but the payment row
+		// did not — without a compensating void the hold on ptID would be
+		// orphaned forever (no payment row references it, no sweeper). Void
+		// it best-effort before releasing the claim so the client's retry
+		// starts clean.
+		if s.lc != nil {
+			if _, verr := s.lc.VoidPending(ptID); verr != nil {
+				log.Printf("compensating void of orphaned hold %s (payment %s Put failed) FAILED: %v — hold requires ops sweep", ptID, p.ID, verr)
+			}
+		}
 		releaseClaim()
 		return Payment{}, err
 	}
