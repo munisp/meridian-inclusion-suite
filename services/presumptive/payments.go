@@ -659,11 +659,21 @@ func (s *PaymentService) Void(paymentID string) (Payment, error) {
 	if err != nil || !ok {
 		return Payment{}, fmt.Errorf("payment %s not found", paymentID)
 	}
-	if p.Status == "captured" {
-		return Payment{}, fmt.Errorf("payment %s already captured; use refund flow", paymentID)
-	}
-	if p.Status == "voided" {
+	// B3 #6: void is only reachable from PRE-CAPTURE states. Once money is
+	// at the provider (capture_in_flight, captured_awaiting_post, captured,
+	// compensated, disputed, charged_back, settled) the hold must be
+	// resolved via the capture/refund/dispute flows — voiding it would
+	// release the payer's funds on the ledger while the PSSP keeps the
+	// captured money.
+	switch p.Status {
+	case "intent", "pending_authorisation", "authorised":
+		// voidable
+	case "voided":
 		return p, nil // idempotent
+	case "captured":
+		return Payment{}, fmt.Errorf("payment %s already captured; use refund flow", paymentID)
+	default:
+		return Payment{}, fmt.Errorf("payment %s is %s: not voidable (money may already be at the provider)", paymentID, p.Status)
 	}
 	if p.PSSPRef != "" {
 		if adapter, err := s.hub.Adapter(p.Provider); err == nil {
