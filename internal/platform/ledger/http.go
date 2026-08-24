@@ -35,7 +35,16 @@ func (h *HTTPClient) do(method, path string, body any, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Dev-Role", "operator")
+	req.Header.Set("X-Service-Name", "inclusion")
+	// B3 #5: service-to-service auth — shared env-injected token in prod,
+	// forgeable X-Dev-Role only as the dev fallback.
+	if tok := os.Getenv("MERIDIAN_SERVICE_TOKEN"); tok != "" {
+		req.Header.Set("X-Service-Token", tok)
+	} else if tok := os.Getenv("LEDGER_SERVICE_TOKEN"); tok != "" {
+		req.Header.Set("X-Service-Token", tok)
+	} else {
+		req.Header.Set("X-Dev-Role", "operator") // dev only
+	}
 	resp, err := h.hc.Do(req)
 	if err != nil {
 		return err
