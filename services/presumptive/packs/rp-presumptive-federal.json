@@ -8,15 +8,32 @@
   "provenance": {
     "as_passed": "Nigeria Tax Administration Act 2025 s.44 (presumptive taxation of the informal sector)",
     "as_gazetted": null,
-    "source_citation": "NRS Informal Sector Presumptive Levy Schedule (federal baseline) 2026"
+    "source_citation": "NRS Informal Sector Presumptive Levy Schedule (federal baseline) 2026",
+    "synced_from": "meridian-rule-packs packs/rp-presumptive-federal/1.0.0.yaml @ f5543879"
   },
   "rules": {
     "levy_table_annual_kobo": {
-      "micro":  { "default": 300000, "food_vendor": 250000, "tailoring": 300000, "artisan": 350000, "transport": 400000, "retail": 300000, "services": 300000 },
-      "small":  { "default": 1000000, "food_vendor": 800000, "tailoring": 1000000, "artisan": 1200000, "transport": 1500000, "retail": 1100000, "services": 1000000 },
-      "medium": { "default": 2500000, "food_vendor": 2000000, "tailoring": 2500000, "artisan": 3000000, "transport": 3500000, "retail": 2800000, "services": 2600000 }
+      "micro": {
+        "default": 250000
+      },
+      "small": {
+        "default": 750000
+      },
+      "lower_medium": {
+        "default": 1500000
+      },
+      "medium": {
+        "default": 3000000
+      },
+      "upper_medium": {
+        "default": 6000000
+      },
+      "large_informal": {
+        "default": 12000000
+      }
     },
     "admin_fee_kobo": 5000,
-    "narrate": "Federal presumptive levy schedule for informal-sector operators (annual, by turnover band x trade category)"
+    "exempt_micro_at_or_below_kobo": 80000000,
+    "narrate": "Federal presumptive annual amounts per turnover band (canonical per-band flat amounts; synced from signed pack)"
   }
 }

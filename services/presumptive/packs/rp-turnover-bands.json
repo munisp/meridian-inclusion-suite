@@ -6,16 +6,26 @@
   "status": "published",
   "subject_to_regazette": true,
   "provenance": {
-    "as_passed": "Nigeria Tax Administration Act 2025 s.44(2) turnover banding for presumptive regime",
+    "as_passed": "Nigeria Tax Act 2025 (NTA), signed 26 June 2025 — presumptive taxation of the informal sector; NRS informal-sector regulations (awaiting gazette)",
     "as_gazetted": null,
-    "source_citation": "NRS Presumptive Turnover Banding Circular 2026/01"
+    "source_citation": "Nigeria Tax Act 2025; NRS Presumptive Tax Framework (draft regulations)",
+    "synced_from": "meridian-rule-packs packs/rp-turnover-bands/1.0.0.yaml @ f5543879"
   },
   "rules": {
+    "boundary_semantics": "min_inclusive_max_exclusive",
     "bands": [
-      { "id": "micro",  "label": "Micro (up to N1,000,000)",      "min_kobo": 0,          "max_kobo": 100000000 },
-      { "id": "small",  "label": "Small (N1m - N5m)",             "min_kobo": 100000001,  "max_kobo": 500000000 },
-      { "id": "medium", "label": "Medium (N5m - N25m)",           "min_kobo": 500000001,  "max_kobo": 2500000000 },
-      { "id": "above_ceiling", "label": "Above presumptive ceiling (graduate to standard regime)", "min_kobo": 2500000001, "max_kobo": null, "graduate": true }
-    ]
+      { "id": "micro", "label": "Band 1 (micro): turnover up to N1,000,000", "min_kobo": 0, "max_kobo": 100000000, "band_order": 1 },
+      { "id": "small", "label": "Band 2 (small): N1m - N3m", "min_kobo": 100000000, "max_kobo": 300000000, "band_order": 2 },
+      { "id": "lower_medium", "label": "Band 3: N3m - N5m", "min_kobo": 300000000, "max_kobo": 500000000, "band_order": 3 },
+      { "id": "medium", "label": "Band 4: N5m - N10m", "min_kobo": 500000000, "max_kobo": 1000000000, "band_order": 4 },
+      { "id": "upper_medium", "label": "Band 5: N10m - N25m", "min_kobo": 1000000000, "max_kobo": 2500000000, "band_order": 5 },
+      { "id": "large_informal", "label": "Band 6: N25m - N100m (ceiling for presumptive regime)", "min_kobo": 2500000000, "max_kobo": 10000000000, "band_order": 6 }
+    ],
+    "exit_rule": {
+      "id": "band.exit.register",
+      "when_annual_turnover_kobo_gte": 10000000000,
+      "decision": "graduate_to_standard_regime",
+      "narrate": "At/above N100m turnover the operator must register for TIN-based filing AND for VAT (aligned with rp-vat-rates vat.registration.threshold)."
+    }
   }
 }

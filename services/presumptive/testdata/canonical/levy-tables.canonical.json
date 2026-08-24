@@ -1,0 +1,5 @@
+{
+  "rp-presumptive-federal": {"micro": 250000, "small": 750000, "lower_medium": 1500000, "medium": 3000000, "upper_medium": 6000000, "large_informal": 12000000},
+  "rp-presumptive-lagos": {"micro": 300000, "small": 1000000, "lower_medium": 2000000, "medium": 4000000, "upper_medium": 8000000, "large_informal": 15000000},
+  "rp-presumptive-kano": {"micro": 150000, "small": 500000, "lower_medium": 1000000, "medium": 2000000, "upper_medium": 4500000, "large_informal": 9000000}
+}

@@ -223,7 +223,9 @@ func TestSimulationWorkflow(t *testing.T) {
 	if sim.Results[1].Exempt != true { // below N800k
 		t.Fatal("op-2 should be exempt")
 	}
-	if sim.Totals["grand_total"] != 1600000+2500000 {
+	// Canonical packs (B3 #3): op-1 Lagos N3m -> lower_medium N20,000.00
+	// (2,000,000 kobo); op-3 Kano N7m -> medium N20,000.00 (2,000,000 kobo).
+	if sim.Totals["grand_total"] != 2000000+2000000 {
 		t.Fatalf("grand total %v", sim.Totals)
 	}
 	// persisted

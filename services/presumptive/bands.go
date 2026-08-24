@@ -41,11 +41,11 @@ type BandEngine struct {
 }
 
 type exemptionRule struct {
-	ID                      string
-	AnnualTurnoverBelowKobo uint64
-	FixedAssetsBelowKobo    uint64
-	IsCompany               bool
-	Reason                  string
+	ID                          string
+	AnnualTurnoverAtOrBelowKobo uint64 // canonical lte semantics (B3 #19)
+	FixedAssetsAtOrBelowKobo    uint64
+	IsCompany                   bool
+	Reason                      string
 }
 
 // LoadBandEngine loads the embedded fallback packs:
@@ -87,11 +87,11 @@ func LoadBandEngine() (*BandEngine, error) {
 				when, _ := row["when"].(map[string]any)
 				then, _ := row["then"].(map[string]any)
 				r := exemptionRule{ID: fmt.Sprint(row["id"])}
-				if v, ok := when["annual_turnover_below_kobo"].(float64); ok {
-					r.AnnualTurnoverBelowKobo = uint64(v)
+				if v, ok := when["annual_turnover_at_or_below_kobo"].(float64); ok {
+					r.AnnualTurnoverAtOrBelowKobo = uint64(v)
 				}
-				if v, ok := when["fixed_assets_below_kobo"].(float64); ok {
-					r.FixedAssetsBelowKobo = uint64(v)
+				if v, ok := when["fixed_assets_at_or_below_kobo"].(float64); ok {
+					r.FixedAssetsAtOrBelowKobo = uint64(v)
 				}
 				r.IsCompany, _ = when["is_company"].(bool)
 				r.Reason = fmt.Sprint(then["reason"])
@@ -131,13 +131,15 @@ func (e *BandEngine) Evaluate(state, tradeCategory string, annualTurnoverKobo ui
 	res := BandResult{Trace: []string{}}
 	// 1) exemptions (rp-exemption-nta)
 	for _, ex := range e.exemptions {
-		if ex.AnnualTurnoverBelowKobo > 0 && annualTurnoverKobo >= ex.AnnualTurnoverBelowKobo {
+		// Canonical "at or below" (lte) semantics (B3 #19): an operator
+		// exactly on the exempt line pays nothing.
+		if ex.AnnualTurnoverAtOrBelowKobo > 0 && annualTurnoverKobo > ex.AnnualTurnoverAtOrBelowKobo {
 			continue
 		}
 		if ex.IsCompany && !isCompany {
 			continue
 		}
-		if ex.FixedAssetsBelowKobo > 0 && fixedAssetsKobo >= ex.FixedAssetsBelowKobo {
+		if ex.FixedAssetsAtOrBelowKobo > 0 && fixedAssetsKobo > ex.FixedAssetsAtOrBelowKobo {
 			continue
 		}
 		res.Exempt = true
@@ -155,7 +157,10 @@ func (e *BandEngine) Evaluate(state, tradeCategory string, annualTurnoverKobo ui
 		if annualTurnoverKobo < b.MinKobo {
 			continue
 		}
-		if b.MaxKobo != nil && annualTurnoverKobo > *b.MaxKobo {
+		// Canonical boundary semantics: [min_kobo, max_kobo) — min
+		// inclusive, max EXCLUSIVE (B3 #3); a turnover exactly on a shared
+		// boundary belongs to the HIGHER band.
+		if b.MaxKobo != nil && annualTurnoverKobo >= *b.MaxKobo {
 			continue
 		}
 		band = b

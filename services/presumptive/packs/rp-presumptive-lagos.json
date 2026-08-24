@@ -8,15 +8,32 @@
   "provenance": {
     "as_passed": "Nigeria Tax Administration Act 2025 s.44; LIRS informal sector levy harmonisation",
     "as_gazetted": null,
-    "source_citation": "Lagos State Informal Sector Presumptive Levy Schedule 2026 (LIRS)"
+    "source_citation": "Lagos State Informal Sector Presumptive Levy Schedule 2026 (LIRS)",
+    "synced_from": "meridian-rule-packs packs/rp-presumptive-lagos/1.0.0.yaml @ f5543879"
   },
   "rules": {
     "levy_table_annual_kobo": {
-      "micro":  { "default": 500000, "food_vendor": 400000, "tailoring": 500000, "artisan": 600000, "transport": 700000, "retail": 500000, "services": 500000 },
-      "small":  { "default": 1500000, "food_vendor": 1200000, "tailoring": 1500000, "artisan": 1800000, "transport": 2000000, "retail": 1600000, "services": 1500000 },
-      "medium": { "default": 3500000, "food_vendor": 3000000, "tailoring": 3500000, "artisan": 4000000, "transport": 4800000, "retail": 3800000, "services": 3600000 }
+      "micro": {
+        "default": 300000
+      },
+      "small": {
+        "default": 1000000
+      },
+      "lower_medium": {
+        "default": 2000000
+      },
+      "medium": {
+        "default": 4000000
+      },
+      "upper_medium": {
+        "default": 8000000
+      },
+      "large_informal": {
+        "default": 15000000
+      }
     },
     "admin_fee_kobo": 10000,
-    "narrate": "Lagos LIRS presumptive levy schedule (annual, by turnover band x trade category)"
+    "exempt_micro_at_or_below_kobo": 80000000,
+    "narrate": "Lagos presumptive annual amounts per turnover band (canonical per-band flat amounts; synced from signed pack)"
   }
 }
