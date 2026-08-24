@@ -1,6 +1,7 @@
 """kyc-engine configuration (SPEC A §5): thresholds tunable via env."""
 from __future__ import annotations
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,11 @@ class Settings(BaseSettings):
 
     service_name: str = "kyc-engine"
     version: str = "1.0.0"
+
+    # --- deployment profile ---
+    # prod => fail-closed: real screening/CAC sources required (see validator
+    # at the bottom of the class).
+    profile: str = "dev"
 
     # --- persistence ---
     # sqlite for dev; postgres://... in prod (schema `kyc`, monthly partitions
@@ -96,6 +102,29 @@ class Settings(BaseSettings):
     screening_match_threshold: float = 0.85   # fuzzy name-match cutoff
     nin_verify_url: str = ""       # empty -> [SIM] NIMC adapter
     vnin_ttl_hours: int = 72       # NIMC vNIN token TTL
+
+    @model_validator(mode="after")
+    def _fail_closed_prod(self) -> "Settings":
+        """PROFILE=prod refuses bundled-sample screening and CAC sim fixtures.
+
+        Without this gate a misconfigured prod deploy would screen every
+        applicant against the bundled sample sanctions/PEP list and validate
+        businesses against deterministic [SIM] CAC fixtures (B1 finding #9).
+        Dev keeps the honestly-tagged sims."""
+        if self.profile.lower() != "prod":
+            return self
+        missing: list[str] = []
+        if not self.screening_provider_url and not self.screening_list_path:
+            missing.append(
+                "SCREENING_PROVIDER_URL or SCREENING_LIST_PATH "
+                "(bundled sample sanctions/PEP list is dev-only)")
+        if not self.cac_registry_url:
+            missing.append("CAC_REGISTRY_URL ([SIM] CAC fixtures are dev-only)")
+        if missing:
+            raise ValueError(
+                "profile=prod FATAL: kyc-engine requires real screening/"
+                "registry sources (fail-closed); missing: " + "; ".join(missing))
+        return self
 
 
 def get_settings() -> Settings:
