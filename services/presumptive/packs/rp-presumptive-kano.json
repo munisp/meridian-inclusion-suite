@@ -8,15 +8,32 @@
   "provenance": {
     "as_passed": "Nigeria Tax Administration Act 2025 s.44; Kano State Revenue (Consolidation) Law informal sector schedule",
     "as_gazetted": null,
-    "source_citation": "Kano State Informal Sector Presumptive Levy Schedule 2026 (KIRS)"
+    "source_citation": "Kano State Informal Sector Presumptive Levy Schedule 2026 (KIRS)",
+    "synced_from": "meridian-rule-packs packs/rp-presumptive-kano/1.0.0.yaml @ f5543879"
   },
   "rules": {
     "levy_table_annual_kobo": {
-      "micro":  { "default": 200000, "food_vendor": 150000, "tailoring": 200000, "artisan": 250000, "transport": 300000, "retail": 200000, "services": 200000 },
-      "small":  { "default": 700000, "food_vendor": 600000, "tailoring": 700000, "artisan": 800000, "transport": 1000000, "retail": 750000, "services": 700000 },
-      "medium": { "default": 1800000, "food_vendor": 1500000, "tailoring": 1800000, "artisan": 2000000, "transport": 2500000, "retail": 1900000, "services": 1800000 }
+      "micro": {
+        "default": 150000
+      },
+      "small": {
+        "default": 500000
+      },
+      "lower_medium": {
+        "default": 1000000
+      },
+      "medium": {
+        "default": 2000000
+      },
+      "upper_medium": {
+        "default": 4500000
+      },
+      "large_informal": {
+        "default": 9000000
+      }
     },
     "admin_fee_kobo": 3000,
-    "narrate": "Kano KIRS presumptive levy schedule (annual, by turnover band x trade category)"
+    "exempt_micro_at_or_below_kobo": 80000000,
+    "narrate": "Kano presumptive annual amounts per turnover band (canonical per-band flat amounts; synced from signed pack)"
   }
 }

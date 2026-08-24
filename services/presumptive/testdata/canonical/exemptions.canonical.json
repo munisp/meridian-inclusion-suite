@@ -1,0 +1,5 @@
+{
+  "pit_tax_free_threshold_turnover_lte_kobo": 80000000,
+  "small_company_turnover_lte_kobo": 10000000000,
+  "small_company_fixed_assets_lte_kobo": 25000000000
+}
