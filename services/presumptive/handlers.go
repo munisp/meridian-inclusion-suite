@@ -15,6 +15,22 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
+// requireRole enforces object-level authorization (audit B4-2): money-moving
+// and registry-control routes must not be reachable by every authenticated
+// principal. Caller must hold at least one of the listed roles, else 403.
+func requireRole(fn http.HandlerFunc, roles ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		for _, role := range roles {
+			if httpx.HasRole(r, role) {
+				fn(w, r)
+				return
+			}
+		}
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"requires role: "+strings.Join(roles, " or "))
+	}
+}
+
 type server struct {
 	pay     *PaymentService
 	float   *FloatService
@@ -79,11 +95,12 @@ func (s *server) nipRoutes(mux *http.ServeMux) {
 		}
 	}
 	mux.HandleFunc("POST /v1/nip/name-enquiry", guard(nipHTTP.nameEnquiry))
-	mux.HandleFunc("POST /v1/nip/payout", guard(nipHTTP.payout))
-	mux.HandleFunc("POST /v1/nip/refund", guard(nipHTTP.refund))
-	mux.HandleFunc("POST /v1/nip/reversal", guard(nipHTTP.reversal))
+	// B4-2: money-moving NIP routes are operator/admin-only (no auditor).
+	mux.HandleFunc("POST /v1/nip/payout", requireRole(guard(nipHTTP.payout), "operator", "admin"))
+	mux.HandleFunc("POST /v1/nip/refund", requireRole(guard(nipHTTP.refund), "operator", "admin"))
+	mux.HandleFunc("POST /v1/nip/reversal", requireRole(guard(nipHTTP.reversal), "operator", "admin"))
 	mux.HandleFunc("GET /v1/nip/transfers/{session}", guard(nipHTTP.getTransfer))
-	mux.HandleFunc("POST /v1/nip/sweep", guard(nipHTTP.sweep))
+	mux.HandleFunc("POST /v1/nip/sweep", requireRole(guard(nipHTTP.sweep), "operator", "admin"))
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -95,23 +112,23 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/bands/evaluate", s.evaluateBand)
 	mux.HandleFunc("GET /v1/packs", s.listPacks)
 
-	// payments
-	mux.HandleFunc("POST /v1/payments/intent", s.createIntent)
+	// payments — B4-2 repair: money-moving lifecycle is operator/admin-only
+	mux.HandleFunc("POST /v1/payments/intent", requireRole(s.createIntent, "operator", "admin"))
 	mux.HandleFunc("GET /v1/payments", s.listPayments)
 	mux.HandleFunc("GET /v1/payments/{id}", s.getPayment)
-	mux.HandleFunc("POST /v1/payments/{id}/authorise", s.authorisePayment)
-	mux.HandleFunc("POST /v1/payments/{id}/capture", s.capturePayment)
-	mux.HandleFunc("POST /v1/payments/{id}/void", s.voidPayment)
+	mux.HandleFunc("POST /v1/payments/{id}/authorise", requireRole(s.authorisePayment, "operator", "admin"))
+	mux.HandleFunc("POST /v1/payments/{id}/capture", requireRole(s.capturePayment, "operator", "admin"))
+	mux.HandleFunc("POST /v1/payments/{id}/void", requireRole(s.voidPayment, "operator", "admin"))
 
 	// PSSP webhooks (public but per-PSSP HMAC-signed)
 	mux.HandleFunc("POST /v1/pssp/webhook/{provider}", s.psspWebhook)
 
-	// PSSP registry (O6 onboarding)
-	mux.HandleFunc("POST /v1/pssps", s.onboardPSSP)
+	// PSSP registry (O6 onboarding) — B4-2: admin-only registry control
+	mux.HandleFunc("POST /v1/pssps", requireRole(s.onboardPSSP, "admin"))
 	mux.HandleFunc("GET /v1/pssps", s.listPSSPs)
 	mux.HandleFunc("GET /v1/pssps/{id}", s.getPSSP)
-	mux.HandleFunc("POST /v1/pssps/{id}/rotate-secret", s.rotatePSSPSecret)
-	mux.HandleFunc("POST /v1/pssps/{id}/status", s.setPSSPStatus)
+	mux.HandleFunc("POST /v1/pssps/{id}/rotate-secret", requireRole(s.rotatePSSPSecret, "admin"))
+	mux.HandleFunc("POST /v1/pssps/{id}/status", requireRole(s.setPSSPStatus, "admin"))
 
 	// certificates (public verify, rate-limited)
 	mux.HandleFunc("GET /v1/certificates/verify/{serial}", s.verifyCertificate)
@@ -120,21 +137,21 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/devices/enroll", s.enrollDevice)
 	mux.HandleFunc("POST /v1/receipts/verify", s.verifyReceipt)
 
-	// agent float
-	mux.HandleFunc("POST /v1/float/accounts", s.openFloat)
-	mux.HandleFunc("POST /v1/float/topup", s.topupFloat)
-	mux.HandleFunc("POST /v1/float/debit", s.debitFloat)
+	// agent float — B4-2: money movement is operator/admin-only
+	mux.HandleFunc("POST /v1/float/accounts", requireRole(s.openFloat, "operator", "admin"))
+	mux.HandleFunc("POST /v1/float/topup", requireRole(s.topupFloat, "operator", "admin"))
+	mux.HandleFunc("POST /v1/float/debit", requireRole(s.debitFloat, "operator", "admin"))
 	mux.HandleFunc("GET /v1/float/{agent}/balance", s.floatBalance)
 	mux.HandleFunc("GET /v1/float/{agent}/movements", s.floatMovements)
 	mux.HandleFunc("GET /v1/float/{agent}/risk", s.floatRisk)
 
-	// gates
+	// gates — B4-2: board-level gate control is admin-only
 	mux.HandleFunc("GET /v1/gates", s.listGates)
-	mux.HandleFunc("POST /v1/gates/{id}/flip", s.flipGate)
+	mux.HandleFunc("POST /v1/gates/{id}/flip", requireRole(s.flipGate, "admin"))
 
 	// workflows
 	mux.HandleFunc("GET /v1/workflows", s.listWorkflows)
-	mux.HandleFunc("POST /v1/workflows/{name}/trigger", s.triggerWorkflow)
+	mux.HandleFunc("POST /v1/workflows/{name}/trigger", requireRole(s.triggerWorkflow, "admin"))
 	mux.HandleFunc("GET /v1/workflows/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/simulations", s.listSimulations)
 
