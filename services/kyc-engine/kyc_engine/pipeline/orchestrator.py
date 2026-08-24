@@ -151,6 +151,7 @@ def run_case(case_id: str) -> dict[str, Any]:
         storage = get_storage()
         unknown_doctype = False
         selfie_pending = case.channel in ("selfie", "agent_pwa")
+        screening_fields: list[dict[str, Any]] = []
 
         docs = sess.execute(select(KycDocument).where(KycDocument.case_id == case_id)).scalars().all()
         try:
@@ -163,6 +164,7 @@ def run_case(case_id: str) -> dict[str, Any]:
                 record_ocr_conf(ocr.conf_avg)
                 fields = _run_stage("fields", lambda: stage_fields.extract_fields(doc.doc_type, ocr.tokens))
                 unknown_doctype = unknown_doctype or bool(fields.get("_unknown_doctype"))
+                screening_fields.append(fields)
 
                 # PII at rest (K5): persist masked + HMAC-pseudonymised
                 # fields; raw values only in the restricted vault column.
@@ -195,8 +197,27 @@ def run_case(case_id: str) -> dict[str, Any]:
                                    "issues": kyb["issues"],
                                    "registry": kyb.get("registry")},
                                   sim=kyb["sim"])
+
+            # Stage: sanctions + PEP screening (FATF R.10/R.12). Runs on the
+            # raw extracted fields BEFORE any decision assembly; a screener
+            # outage raises -> retried -> StagePoisoned -> DLQ (fail-closed,
+            # never a silent pass). A sanctions hit is a hard-fail at
+            # decision time (evaluate_decision SANCTIONS_HIT branch).
+            scr = _run_stage("screening", lambda: _screen_all(screening_fields))
+            hit = scr["sanctions_hit"]
+            _record_check(sess, case_id, "screening", 0.0 if hit else 1.0,
+                          not hit, _mask_screening_detail(scr), sim=scr["sim"])
         except StagePoisoned as e:
+            # Fail-closed: the case lands in the DLQ (status=failed) AND the
+            # persisted decision is a hard reject with PIPELINE_DLQ — a
+            # poisoned pipeline must never leave decision NULL (which reads
+            # as "undecided/pending" downstream).
+            case.decision = "reject"
+            case.risk_score = 100
+            case.reason_codes = ["PIPELINE_DLQ"]
             case.status = "failed"
+            _decision_hashes(sess, case.id, "reject", 0, ["PIPELINE_DLQ"],
+                             actor="system")
             sess.commit()
             audit.emit(case_id, "kyc.dlq.v1", {"error": str(e)}, session=sess)
             sess.commit()
@@ -222,6 +243,40 @@ def run_case(case_id: str) -> dict[str, Any]:
         return decision
     finally:
         sess.close()
+
+
+def _screen_all(fields_list: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate sanctions/PEP screening across all documents' fields."""
+    matches: list[dict[str, Any]] = []
+    names: list[str] = []
+    sim = False
+    provider = "unknown"
+    for fields in fields_list:
+        res = stage_screening.run_screening(fields)
+        matches.extend(res["matches"])
+        names.extend(res["names"])
+        sim = sim or res["sim"]
+        provider = res["provider"]
+    matches.sort(key=lambda m: -m["score"])
+    return {"screened": True, "provider": provider, "names": names,
+            "matches": matches,
+            "sanctions_hit": any(m["kind"] == "sanctions" for m in matches),
+            "pep_hit": any(m["kind"] == "pep" for m in matches),
+            "sim": sim}
+
+
+def _mask(value: str) -> str:
+    v = value or ""
+    return v if len(v) <= 2 else v[0] + "*" * (len(v) - 2) + v[-1]
+
+
+def _mask_screening_detail(res: dict[str, Any]) -> dict[str, Any]:
+    """Evidence detail with subject PII masked (NDPA s.24 TOMs); the listed
+    (public) sanctions/PEP entry names are kept for auditability."""
+    return {**res,
+            "names": [_mask(n) for n in res["names"]],
+            "matches": [{**m, "screened_name": _mask(m.get("screened_name", ""))}
+                        for m in res["matches"]]}
 
 
 def evaluate_decision(case_id: str, sess=None, unknown_doctype: bool = False) -> dict[str, Any]:
