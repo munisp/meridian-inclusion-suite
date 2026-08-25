@@ -437,6 +437,9 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 		return fmt.Errorf("verification service unreachable; serial format valid but cannot confirm offline")
 	}
 
+	// I3: USSD -> e-invoice issuance/status via the einvoicing service.
+	registerEInvActions(actions, bus)
+
 	return actions
 }
 

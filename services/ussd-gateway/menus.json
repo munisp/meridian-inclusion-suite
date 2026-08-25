@@ -5,7 +5,7 @@
   "menus": {
     "home": {
       "type": "options",
-      "text": "Welcome to NRS Tax Services\n1. Register (Onboarding)\n2. TIN provision status\n3. Pay presumptive levy\n4. Verify certificate",
+      "text": "Welcome to NRS Tax Services\n1. Register (Onboarding)\n2. TIN provision status\n3. Pay presumptive levy\n4. Verify certificate\n5. E-invoice services",
       "options": [
         {
           "key": "1",
@@ -22,8 +22,74 @@
         {
           "key": "4",
           "next": "cert_input"
+        },
+        {
+          "key": "5",
+          "next": "einv_home"
         }
       ]
+    },
+    "einv_home": {
+      "type": "options",
+      "text": "E-invoice services:\n1. Issue an invoice\n2. Check invoice status",
+      "options": [
+        {
+          "key": "1",
+          "next": "einv_amount"
+        },
+        {
+          "key": "2",
+          "next": "einv_irn_input"
+        }
+      ]
+    },
+    "einv_amount": {
+      "type": "input",
+      "text": "Enter invoice amount in KOBO (e.g. 150000 = N1,500.00):",
+      "save_as": "amount_kobo",
+      "validate": "^[1-9][0-9]{0,11}$",
+      "invalid_text": "Invalid amount. Enter whole kobo only, greater than 0:",
+      "next": "einv_buyer_tin"
+    },
+    "einv_buyer_tin": {
+      "type": "input",
+      "text": "Enter the buyer's TIN (8-14 digits):",
+      "save_as": "buyer_tin",
+      "validate": "^[0-9]{8,14}$",
+      "invalid_text": "Invalid TIN. Enter 8-14 digits:",
+      "next": "einv_issue"
+    },
+    "einv_issue": {
+      "type": "action",
+      "action": "einv.issue",
+      "next": "einv_done",
+      "error_next": "einv_error"
+    },
+    "einv_done": {
+      "type": "end",
+      "text": "Invoice issued.\nIRN: {{irn}}\nAmount: N{{amount_naira}}\nStatus: {{invoice_status}}\nKeep your IRN safe; use it to check status anytime."
+    },
+    "einv_irn_input": {
+      "type": "input",
+      "text": "Enter the invoice IRN:",
+      "save_as": "irn",
+      "validate": "^[A-Za-z0-9\\-_]{5,80}$",
+      "invalid_text": "Invalid IRN format. Try again:",
+      "next": "einv_status"
+    },
+    "einv_status": {
+      "type": "action",
+      "action": "einv.status",
+      "next": "einv_status_done",
+      "error_next": "einv_error"
+    },
+    "einv_status_done": {
+      "type": "end",
+      "text": "Invoice {{irn}}\nStatus: {{invoice_status}}\nPayment: {{payment_status}}"
+    },
+    "einv_error": {
+      "type": "end",
+      "text": "E-invoice request failed: {{error}}\nNo invoice was issued by this attempt. Dial *347*88# to retry."
     },
     "onb_nin": {
       "type": "input",
