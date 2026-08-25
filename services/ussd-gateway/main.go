@@ -18,6 +18,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("menu graph: %v", err)
 	}
+	// I3 fail-closed gate: prod must wire the einvoicing upstream explicitly.
+	if _, err := einvConfigFromEnv(); err != nil {
+		log.Fatalf("einvoicing config: %v", err)
+	}
 	bus := events.NewBusFromEnv(serviceName)
 	actions := RegisterActions(busAdapter{bus: bus})
 	// M-2: USSD PIN gate for sensitive actions (hashed storage, 3-strike lock).
