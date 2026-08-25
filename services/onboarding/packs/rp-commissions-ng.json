@@ -1,0 +1,22 @@
+{
+  "id": "rp-commissions-ng",
+  "version": "1.0.0",
+  "title": "Agent hierarchy commission table (NGN, kobo-integers)",
+  "description": "EMBEDDED FALLBACK COPY — the canonical, governed YAML lives in the meridian-rule-packs repo (SPEC 1.4 format). Loaded when COMMISSION_PACK_VERSION is unset or matches this version.",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "status": "published",
+  "provenance": {
+    "as_passed": "Meridian NRS agent commission policy, hierarchy rollout (feature I6)",
+    "source_citation": "meridian-rule-packs packs/rp-commissions-ng (canonical); embedded fallback honestly tagged"
+  },
+  "rules": {
+    "currency": "NGN",
+    "unit": "kobo",
+    "levels": [
+      { "level": 1, "rate_bps": 250, "narrate": "capturing agent: 2.50% of the settled transaction" },
+      { "level": 2, "rate_bps": 100, "narrate": "direct upline: 1.00%" },
+      { "level": 3, "rate_bps": 50,  "narrate": "second upline: 0.50%" }
+    ]
+  }
+}
