@@ -51,6 +51,14 @@ func main() {
 		agents:       NewAgentRegistry(st),
 		docs:         NewDocService(st, reg, docBackend),
 	}
+	// I6: agent hierarchy + rule-pack commission engine (fail-closed pack
+	// load: COMMISSION_PACK_VERSION must match the carried table).
+	srv.hierarchy = NewHierarchy(srv.agents)
+	ce, err := LoadCommissionEngine(st, srv.hierarchy, lc)
+	if err != nil {
+		log.Fatalf("commission engine: %v", err)
+	}
+	srv.commissions = ce
 	if fs, ok := docBackend.(*fsDocBackend); ok {
 		srv.fsBackend = fs
 	}
