@@ -21,7 +21,12 @@ type Agent struct {
 	State         string `json:"state"`                // operating scope
 	LGA           string `json:"lga"`
 	AssociationID string `json:"association_id,omitempty"` // market association link
-	VettingStatus string `json:"vetting_status"`           // pending|approved|suspended|rejected
+	// I6: hierarchy fields. TenantID scopes the agent to a tenant (all
+	// hierarchy/commission operations are tenant-isolated); ParentID links
+	// the agent to its upline parent ("" = root of its own subtree).
+	TenantID      string `json:"tenant_id,omitempty"`
+	ParentID      string `json:"parent_id,omitempty"`
+	VettingStatus string `json:"vetting_status"` // pending|approved|suspended|rejected
 	Notes         string `json:"notes,omitempty"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
@@ -46,6 +51,10 @@ func (a *AgentRegistry) Register(in Agent) (Agent, error) {
 		return Agent{}, fmt.Errorf("full_name and phone are required")
 	}
 	in.ID = ids.WithPrefix("ag")
+	if in.TenantID == "" {
+		in.TenantID = DefaultTenant
+	}
+	in.ParentID = "" // hierarchy links are made via Attach (cycle/depth-checked)
 	in.VettingStatus = "pending"
 	in.CreatedAt = nowRFC3339()
 	in.UpdatedAt = in.CreatedAt

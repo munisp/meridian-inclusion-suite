@@ -22,6 +22,8 @@ type server struct {
 	associations *AssociationService
 	crdt         *CRDTMergeService
 	agents       *AgentRegistry
+	hierarchy    *Hierarchy
+	commissions  *CommissionEngine
 	docs         *DocService
 	fsBackend    *fsDocBackend // non-nil only in dev profile
 }
@@ -43,6 +45,10 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/agents", s.listAgents)
 	mux.HandleFunc("GET /v1/agents/{id}", s.getAgent)
 	mux.HandleFunc("POST /v1/agents/{id}/vetting", s.setAgentVetting)
+	mux.HandleFunc("POST /v1/agents/{id}/parent", s.attachSubAgent)
+	mux.HandleFunc("GET /v1/agents/{id}/downline", s.agentDownline)
+	mux.HandleFunc("POST /v1/commissions/accrue", s.accrueCommission)
+	mux.HandleFunc("GET /v1/agents/{id}/commissions", s.agentCommissionRecords)
 
 	mux.HandleFunc("POST /v1/operators/{id}/documents/presign", s.presignDoc)
 	mux.HandleFunc("POST /v1/operators/{id}/documents/complete", s.completeDoc)
@@ -581,6 +587,15 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
+	if s.hierarchy != nil {
+		// I6: tenant- + subtree-scoped read (no cross-tenant existence oracle).
+		ag, ok := s.hierarchy.visibleAgent(w, r, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, ag)
+		return
+	}
 	ag, ok, err := s.agents.Get(r.PathValue("id"))
 	if err != nil || !ok {
 		httpx.WriteProblem(w, http.StatusNotFound, "not_found", "agent not found")
