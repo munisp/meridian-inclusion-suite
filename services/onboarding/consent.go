@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
 
@@ -28,7 +29,7 @@ func NewConsentService(st *store.Store) *ConsentService {
 	return &ConsentService{
 		base:  strings.TrimRight(os.Getenv("CONSENT_URL"), "/"),
 		st:    st,
-		hc:    &http.Client{Timeout: 10 * time.Second},
+		hc:    &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
 		local: os.Getenv("CONSENT_URL") == "",
 	}
 }

@@ -537,7 +537,7 @@ func (w *Workflows) commissionSettlement(period string) (any, error) {
 	}
 	if fundTotal > 0 {
 		if _, err := w.ledger.Transfer(ledger.Transfer{
-			ID: ledger.DeterministicTransferID("comm-fund:" + period + ":" + fmt.Sprint(fundTotal)),
+			ID:             ledger.DeterministicTransferID("comm-fund:" + period + ":" + fmt.Sprint(fundTotal)),
 			DebitAccountID: treasuryID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
 			Code: ledger.CodeTopup, Amount: fundTotal, UserData: "pool-funding:" + period,
 		}); err != nil {
