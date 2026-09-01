@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import calculators, chat, faq
+from .otel import TenantBaggageMiddleware, init_otel
 from .packs import load_pack, pack_ref
 
 SERVICE = "education"
@@ -28,6 +29,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# OTel (DESIGN-CONTRACT.md): tenant baggage first, then init_otel adds the
+# FastAPI server-span middleware outermost. Fail-soft: never raises.
+app.add_middleware(TenantBaggageMiddleware)
+init_otel(app)
 
 
 @app.get("/healthz")
