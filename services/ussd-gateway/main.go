@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -9,11 +10,18 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	kvstore "github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 func main() {
+	// OTel bootstrap (DESIGN-CONTRACT.md): fail-soft — no endpoint means
+	// no-op providers, never a startup failure.
+	otelCtx := context.Background()
+	providers := otelx.InitProviders(otelCtx)
+	defer providers.Shutdown(otelCtx)
+
 	graph, err := LoadMenuGraph()
 	if err != nil {
 		log.Fatalf("menu graph: %v", err)
@@ -56,7 +64,7 @@ func main() {
 		port = "8104"
 	}
 	// M-6/M-7: bounded bodies + origin-scoped CORS wrap the whole chain.
-	handler := httpx.MaxBody(httpx.CORS(httpx.Auth(publicPath)(srv.routes())))
+	handler := otelx.Middleware(httpx.MaxBody(httpx.CORS(httpx.Auth(publicPath)(srv.routes()))))
 	log.Printf("ussd-gateway %s listening on :%s (service_code=%s ttl=%ds menus=%d)",
 		serviceVersion, port, graph.ServiceCode, graph.SessionTTLSeconds, len(graph.Menus))
 	log.Fatal(httpx.ListenAndServe(":"+port, handler))

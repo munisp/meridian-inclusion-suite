@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 )
 
 // actions implements the DSL action handlers. Where a backing service URL is
@@ -181,7 +182,11 @@ func bandName(turnoverKobo uint64) string {
 	}
 }
 
-func httpClient() *http.Client { return &http.Client{Timeout: 8 * time.Second} }
+// httpClient is the shared outbound client (einvoicing/onboarding/psm
+// calls); otelx.Client adds client spans + propagation, no-op when disabled.
+func httpClient() *http.Client {
+	return &http.Client{Timeout: 8 * time.Second, Transport: otelx.Client(nil)}
+}
 
 // RegisterActions builds the action handler registry.
 func RegisterActions(bus eventPublisher) map[string]ActionHandler {
