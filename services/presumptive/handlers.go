@@ -12,6 +12,7 @@ import (
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
@@ -73,7 +74,7 @@ func (s *server) checkWebhookReplay(w http.ResponseWriter, r *http.Request) bool
 // rail is misconfigured/unreachable, NIP endpoints return 503 rather than
 // silently degrading to the simulator) and mounts the NIP surface. Minimal
 // additive hook — no changes to the payments/disputes core paths.
-func (s *server) nipRoutes(mux *http.ServeMux) {
+func (s *server) nipRoutes(mux *otelx.Mux) {
 	init := func() (*NIPService, error) {
 		s.nipOnce.Do(func() {
 			// reuse the payment service's durable store for transfer records
@@ -107,7 +108,7 @@ func (s *server) nipRoutes(mux *http.ServeMux) {
 }
 
 func (s *server) routes() *http.ServeMux {
-	mux := http.NewServeMux()
+	mux := otelx.NewMux()
 	mux.HandleFunc("GET /healthz", httpx.Healthz(serviceName, serviceVersion))
 	mux.HandleFunc("GET /readyz", httpx.Readyz(nil))
 
@@ -160,7 +161,7 @@ func (s *server) routes() *http.ServeMux {
 
 	// NIP rail (N1): name enquiry, payout/refund, reversal, TSQ sweep
 	s.nipRoutes(mux)
-	return mux
+	return mux.ServeMux
 }
 
 func (s *server) evaluateBand(w http.ResponseWriter, r *http.Request) {

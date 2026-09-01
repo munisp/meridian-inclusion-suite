@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
 )
 
@@ -29,7 +30,7 @@ func NewPSSPHTTPAdapter(base, apiKey string) *PSSPHTTPAdapter {
 	return &PSSPHTTPAdapter{
 		base:    strings.TrimRight(base, "/"),
 		apiKey:  apiKey,
-		hc:      &http.Client{Timeout: 10 * time.Second},
+		hc:      &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
 		breaker: &resilience.Breaker{Threshold: 5, Cooldown: 30 * time.Second},
 	}
 }
