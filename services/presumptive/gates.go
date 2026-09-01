@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 )
 
 // presumptiveGateID is the reg-watch gate gating presumptive collections
@@ -34,7 +35,7 @@ func NewGateClient() *GateClient {
 	return &GateClient{
 		base: strings.TrimRight(os.Getenv("REG_WATCH_URL"), "/"),
 		file: f,
-		hc:   &http.Client{Timeout: 8 * time.Second},
+		hc:   &http.Client{Timeout: 8 * time.Second, Transport: otelx.Client(nil)},
 	}
 }
 

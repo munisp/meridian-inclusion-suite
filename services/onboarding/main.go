@@ -1,17 +1,25 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
 )
 
 func main() {
+	// OTel bootstrap (DESIGN-CONTRACT.md): fail-soft — no endpoint means
+	// no-op providers, never a startup failure.
+	otelCtx := context.Background()
+	providers := otelx.InitProviders(otelCtx)
+	defer providers.Shutdown(otelCtx)
+
 	st, err := store.OpenFromEnvProfile()
 	if err != nil {
 		log.Fatalf("store: %v", err)
@@ -68,7 +76,7 @@ func main() {
 		port = "8101"
 	}
 	// M-6/M-7: bounded bodies + origin-scoped CORS wrap the whole chain.
-	handler := httpx.MaxBody(httpx.CORS(httpx.Auth(publicPath)(srv.routes())))
+	handler := otelx.Middleware(httpx.MaxBody(httpx.CORS(httpx.Auth(publicPath)(srv.routes()))))
 	log.Printf("onboarding %s listening on :%s (nimc=%T ledger=%T tin_graph=%s consent_url=%s)",
 		serviceVersion, port, verifier, lc, os.Getenv("TIN_GRAPH_URL"), os.Getenv("CONSENT_URL"))
 	log.Fatal(httpx.ListenAndServe(":"+port, handler))

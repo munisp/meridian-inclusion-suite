@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -8,11 +9,18 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ledger"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
 func main() {
+	// OTel bootstrap (DESIGN-CONTRACT.md): fail-soft — no endpoint means
+	// no-op providers, never a startup failure.
+	otelCtx := context.Background()
+	providers := otelx.InitProviders(otelCtx)
+	defer providers.Shutdown(otelCtx)
+
 	st, err := store.OpenFromEnvProfile()
 	if err != nil {
 		log.Fatalf("store: %v", err)
@@ -54,7 +62,7 @@ func main() {
 	if port == "" {
 		port = "8102"
 	}
-	handler := httpx.CORS(httpx.Auth(publicPath)(srv.routes()))
+	handler := otelx.Middleware(httpx.CORS(httpx.Auth(publicPath)(srv.routes())))
 	log.Printf("presumptive %s listening on :%s (ledger=%T reg_watch=%s packs=%d)",
 		serviceVersion, port, lc, os.Getenv("REG_WATCH_URL"), len(engine.Packs()))
 	log.Fatal(httpx.ListenAndServe(":"+port, handler))

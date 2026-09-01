@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/workflowx"
 )
@@ -139,7 +140,7 @@ func NewNIMCHTTPAdapter(base, apiKey string) *NIMCHTTPAdapter {
 	return &NIMCHTTPAdapter{
 		base:    strings.TrimRight(base, "/"),
 		apiKey:  apiKey,
-		hc:      &http.Client{Timeout: 10 * time.Second},
+		hc:      &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
 		breaker: &resilience.Breaker{Threshold: 5, Cooldown: 30 * time.Second},
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
 )
 
@@ -79,7 +80,7 @@ func NewAggregatorNotifier(base, key string) *AggregatorNotifier {
 	return &AggregatorNotifier{
 		base:    strings.TrimRight(base, "/"),
 		key:     key,
-		hc:      &http.Client{Timeout: 10 * time.Second},
+		hc:      &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
 		breaker: &resilience.Breaker{Threshold: 5, Cooldown: 30 * time.Second},
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/resilience"
 )
 
@@ -81,8 +82,9 @@ func NewNIPHTTPAdapter(base, apiKey string) (*NIPHTTPAdapter, error) {
 		base:   strings.TrimRight(base, "/"),
 		apiKey: apiKey,
 		hc: &http.Client{
-			Timeout:   30 * time.Second, // NIP transfers can legitimately take seconds; TSQ resolves timeouts
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			Timeout: 30 * time.Second, // NIP transfers can legitimately take seconds; TSQ resolves timeouts
+			// otelx.Client wraps the mTLS transport (client spans; no-op when disabled).
+			Transport: otelx.Client(&http.Transport{TLSClientConfig: tlsCfg}),
 		},
 		brk: &resilience.Breaker{Threshold: 5, Cooldown: 30 * time.Second},
 	}, nil

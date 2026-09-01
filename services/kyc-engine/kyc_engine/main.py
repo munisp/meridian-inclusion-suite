@@ -22,10 +22,16 @@ from .schemas.api import (CaseOut, CheckOut, CreateCaseRequest, CreateCaseRespon
                           EvidenceChainOut, EvidenceLink, LivenessSessionOut,
                           ReviewRequest)
 from .workers import liveness_ws
+from .otel import TenantBaggageMiddleware, init_otel
 
 app = FastAPI(title="Meridian KYC/KYB Engine", version=get_settings().version)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
+# OTel (DESIGN-CONTRACT.md): tenant baggage first, then init_otel adds the
+# FastAPI server-span middleware outermost so the tenant lands on the
+# recording span. Fail-soft: no endpoint = no export, never a startup error.
+app.add_middleware(TenantBaggageMiddleware)
+init_otel(app)
 
 
 @app.on_event("startup")

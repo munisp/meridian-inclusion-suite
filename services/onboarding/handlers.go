@@ -9,6 +9,7 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/ids"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 )
 
 // server bundles the onboarding service dependencies.
@@ -29,7 +30,7 @@ type server struct {
 }
 
 func (s *server) routes() *http.ServeMux {
-	mux := http.NewServeMux()
+	mux := otelx.NewMux()
 	mux.HandleFunc("GET /healthz", httpx.Healthz(serviceName, serviceVersion))
 	mux.HandleFunc("GET /readyz", httpx.Readyz(nil))
 
@@ -83,7 +84,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/workflows/{name}/trigger", s.triggerWorkflow)
 	mux.HandleFunc("GET /v1/workflows/runs", s.listRuns)
 	mux.HandleFunc("POST /v1/graduation/candidates", s.stageGraduation)
-	return mux
+	return mux.ServeMux
 }
 
 func (s *server) createOperator(w http.ResponseWriter, r *http.Request) {

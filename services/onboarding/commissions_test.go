@@ -297,9 +297,9 @@ func TestCommissionPayoutPurgeExpired(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	put(CommissionPayout{AgentID: "a1", Period: "2026-01", AmountKobo: 1, TransferID: "tx", PaidAt: old})              // expired, terminal -> purge
-	put(CommissionPayout{AgentID: "a2", Period: "2026-01", AmountKobo: 1, TransferID: "", PaidAt: old})                // expired, non-terminal -> keep
-	put(CommissionPayout{AgentID: "a3", Period: "2026-01", AmountKobo: 1, TransferID: "tx", PaidAt: nowRFC3339()})     // fresh -> keep
+	put(CommissionPayout{AgentID: "a1", Period: "2026-01", AmountKobo: 1, TransferID: "tx", PaidAt: old})          // expired, terminal -> purge
+	put(CommissionPayout{AgentID: "a2", Period: "2026-01", AmountKobo: 1, TransferID: "", PaidAt: old})            // expired, non-terminal -> keep
+	put(CommissionPayout{AgentID: "a3", Period: "2026-01", AmountKobo: 1, TransferID: "tx", PaidAt: nowRFC3339()}) // fresh -> keep
 
 	n, err := wf.PurgeExpiredCommissionPayouts()
 	if err != nil {

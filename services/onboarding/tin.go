@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 )
 
 // TINProvisionResult is the outcome of TIN provisioning.
@@ -36,7 +38,7 @@ type TinGraphClient struct {
 }
 
 func NewTinGraphClient(base string) *TinGraphClient {
-	return &TinGraphClient{base: strings.TrimRight(base, "/"), hc: &http.Client{Timeout: 10 * time.Second}}
+	return &TinGraphClient{base: strings.TrimRight(base, "/"), hc: &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)}}
 }
 
 func (c *TinGraphClient) ProvisionForNIN(ninHash string) (TINProvisionResult, error) {

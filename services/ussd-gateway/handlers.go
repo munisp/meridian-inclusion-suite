@@ -13,6 +13,7 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/keyx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/webhookguard"
 )
 
@@ -55,14 +56,14 @@ func (s *server) checkReplay(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *server) routes() *http.ServeMux {
-	mux := http.NewServeMux()
+	mux := otelx.NewMux()
 	mux.HandleFunc("GET /healthz", httpx.Healthz(serviceName, serviceVersion))
 	mux.HandleFunc("GET /readyz", httpx.Readyz(nil))
 	mux.HandleFunc("POST /webhook/ussd", s.webhook)
 	mux.HandleFunc("POST /v1/simulate", s.simulate)
 	mux.HandleFunc("GET /v1/menus", s.menus)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.session)
-	return mux
+	return mux.ServeMux
 }
 
 // processInput runs one input against the session (creating it on first use)

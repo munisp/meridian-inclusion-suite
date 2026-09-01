@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/otelx"
 )
 
 // HTTPClient talks to the core ledger service (SPEC §2 ledger REST surface).
@@ -19,7 +21,9 @@ type HTTPClient struct {
 }
 
 func NewHTTPClient(base string) *HTTPClient {
-	return &HTTPClient{base: strings.TrimRight(base, "/"), hc: &http.Client{Timeout: 10 * time.Second}}
+	// otelx.Client: client span + traceparent/baggage injection per call
+	// (no-op when telemetry is disabled — never affects the funds path).
+	return &HTTPClient{base: strings.TrimRight(base, "/"), hc: &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)}}
 }
 
 func (h *HTTPClient) do(method, path string, body any, out any) error {
