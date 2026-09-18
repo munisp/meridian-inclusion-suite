@@ -44,9 +44,16 @@ func TestPSMIntentIdempotencyTTLAndExpiredKeyReuse(t *testing.T) {
 	if d := time.Until(exp); d < 6*24*time.Hour || d > 8*24*time.Hour {
 		t.Fatalf("TTL not ~7 days: %v", d)
 	}
-	// expire it: reused key is treated as new
+	// expire it: reused key is treated as new. (R4-S1b#9: the prior payment
+	// must first reach a terminal no-money state — a still-pending payment
+	// blocks a fresh intent for the same (tin, period) regardless of key
+	// expiry, which is exactly the double-pay the uniqueness guard exists
+	// to prevent.)
 	rec.ExpiresAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 	if err := ts.st.Put("idempotency", "k-ttl", rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.pay.Void(a.ID); err != nil {
 		t.Fatal(err)
 	}
 	c, err := ts.pay.CreateIntent(psmIntentReq("k-ttl"))
