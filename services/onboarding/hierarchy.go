@@ -220,14 +220,28 @@ func subtreeHeight(rootID string, sub []Agent) int {
 			children[ag.ParentID] = append(children[ag.ParentID], ag.ID)
 		}
 	}
+	// R4-S3#3 defense-in-depth (mirrors the Subtree BFS visited set): the
+	// recursion must terminate even on a PRE-EXISTING stored cycle (written
+	// before the Attach mutex existed); without a guard a legacy cycle
+	// recurses forever here and overflows the stack on the next Attach.
+	// `onPath` cuts the current DFS path at a repeated node (returning a
+	// bounded height) while still allowing shared descendants in a diamond
+	// DAG to be counted from every path — so the height stays exact for
+	// acyclic data and merely bounded for corrupted data.
+	onPath := map[string]bool{}
 	var walk func(id string) int
 	walk = func(id string) int {
+		if onPath[id] {
+			return 0 // stored cycle: stop this path instead of overflowing
+		}
+		onPath[id] = true
 		max := 0
 		for _, ch := range children[id] {
 			if d := walk(ch) + 1; d > max {
 				max = d
 			}
 		}
+		delete(onPath, id)
 		return max
 	}
 	return walk(rootID)
