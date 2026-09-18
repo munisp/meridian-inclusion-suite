@@ -49,6 +49,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/agents/{id}/parent", s.attachSubAgent)
 	mux.HandleFunc("GET /v1/agents/{id}/downline", s.agentDownline)
 	mux.HandleFunc("POST /v1/commissions/accrue", s.accrueCommission)
+	mux.HandleFunc("POST /v1/commissions/clawback", s.clawbackCommission)
 	mux.HandleFunc("GET /v1/agents/{id}/commissions", s.agentCommissionRecords)
 
 	mux.HandleFunc("POST /v1/operators/{id}/documents/presign", s.presignDoc)
@@ -325,7 +326,7 @@ func (s *server) verifyNIN(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		NIN string `json:"nin"`
 	}
-	if err := httpx.DecodeJSON(r, &in); err != nil || in.NIN == "" {
+	if err := httpx.DecodeJSON(r, &in); err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "validation", "nin is required")
 		return
 	}
