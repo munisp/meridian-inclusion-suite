@@ -35,6 +35,7 @@ type Payment struct {
 	CertificateSerial string `json:"certificate_serial,omitempty"`
 	DisputeID         string `json:"dispute_id,omitempty"` // open/resolved dispute record (G11)
 	RulePackVersion   string `json:"rule_pack_version"`
+	TurnoverKobo      uint64 `json:"annual_turnover_kobo,omitempty"` // intent-time evaluation input (pack re-validation at capture, R4-S1a#10)
 	FailReason        string `json:"fail_reason,omitempty"`
 	CreatedAt         string `json:"created_at"`
 	UpdatedAt         string `json:"updated_at"`
