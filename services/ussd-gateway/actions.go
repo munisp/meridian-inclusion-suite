@@ -44,7 +44,36 @@ func isProdProfile() bool {
 	return strings.EqualFold(os.Getenv("AUTH_MODE"), "keycloak")
 }
 
-// onboardingPost is the shared signed-role client for the onboarding svc.
+// ussdServiceToken returns the env-injected shared service token for
+// service-to-service calls (R4-S1b#5): USSD_SERVICE_TOKEN first, then the
+// platform-wide MERIDIAN_SERVICE_TOKEN ("" in dev).
+func ussdServiceToken() string {
+	if tok := os.Getenv("USSD_SERVICE_TOKEN"); tok != "" {
+		return tok
+	}
+	return os.Getenv("MERIDIAN_SERVICE_TOKEN")
+}
+
+// setServiceAuth authenticates one outbound service-to-service request with
+// the shared X-Service-Token credential (validated fail-closed server-side).
+// PROFILE=prod WITHOUT a configured token fails closed here — the hardcoded
+// X-Dev-Role: operator spoof this replaces is honoured only as the dev
+// fallback, never in prod.
+func setServiceAuth(req *http.Request) error {
+	req.Header.Set("X-Service-Name", serviceName)
+	if tok := ussdServiceToken(); tok != "" {
+		req.Header.Set("X-Service-Token", tok)
+		return nil
+	}
+	if isProdProfile() {
+		return fmt.Errorf("USSD_SERVICE_TOKEN/MERIDIAN_SERVICE_TOKEN is required in prod profile for service-to-service calls (fail closed)")
+	}
+	req.Header.Set("X-Dev-Role", "operator") // dev fallback only
+	return nil
+}
+
+// onboardingPost is the shared service-authenticated client for the
+// onboarding svc.
 func onboardingPost(onbURL, path string, payload any, out any) (int, error) {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(onbURL, "/")+path, bytes.NewReader(body))
@@ -52,7 +81,9 @@ func onboardingPost(onbURL, path string, payload any, out any) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Dev-Role", "operator")
+	if err := setServiceAuth(req); err != nil {
+		return 0, err
+	}
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		return 0, err
@@ -309,7 +340,9 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 			})
 			req, _ := http.NewRequest(http.MethodPost, psmURL+"/v1/bands/evaluate", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Dev-Role", "operator")
+			if err := setServiceAuth(req); err != nil {
+				return err
+			}
 			resp, err := httpClient().Do(req)
 			if err == nil && resp.StatusCode < 300 {
 				var eval struct {
@@ -376,7 +409,9 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 			})
 			req, _ := http.NewRequest(http.MethodPost, psmURL+"/v1/workflows/wf-psm-payment/trigger", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Dev-Role", "operator")
+			if err := setServiceAuth(req); err != nil {
+				return err
+			}
 			resp, err := httpClient().Do(req)
 			if err == nil {
 				defer resp.Body.Close()
