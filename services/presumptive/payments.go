@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/events"
@@ -129,6 +130,12 @@ func intentRequestHash(in IntentRequest) string {
 	return fmt.Sprintf("%x", sum[:16])
 }
 
+// ErrDuplicateLevy is returned when a second payment is attempted for a
+// (tin_hash, period, instalment class) that already has a pending-or-posted
+// payment, from ANY channel (USSD/POS/PWA). Cross-channel double-pay of the
+// same levy is rejected, never double-captured (R4-S1b#9).
+var ErrDuplicateLevy = errors.New("a pending or posted presumptive levy payment already exists for this TIN and period")
+
 // PaymentService runs the payment lifecycle:
 // intent -> pending transfer (ledger 200, code 1 authorise) -> PSSP authorise
 // -> capture (post pending, code 2) / void (code 3) -> certificate.
@@ -140,6 +147,11 @@ type PaymentService struct {
 	gates  *GateClient
 	certs  *CertificateService
 	bus    events.Bus
+	// mu serialises the duplicate-levy check + payment create so two
+	// concurrent intents (different idempotency keys, e.g. USSD redial AND
+	// a POS double-pay) can never both pass the (tin, period) uniqueness
+	// scan (R4-S1b#9).
+	mu sync.Mutex
 }
 
 func NewPaymentService(st *store.Store, lc ledger.Client, hub *PSSPHub, eng *BandEngine, gates *GateClient, certs *CertificateService, bus events.Bus) *PaymentService {
@@ -191,6 +203,31 @@ type IntentRequest struct {
 	// a replayed key returns the originally created payment (200 replay),
 	// never a second pending hold.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// duplicateLevyStatuses are the payment states that BLOCK a new payment for
+// the same (tin, period, instalment class): anything pending or posted.
+// Terminal no-money states (failed/voided/compensated/charged_back) free the
+// slot so a genuine re-pay after failure is still possible.
+var duplicateLevyStatuses = map[string]bool{
+	"intent": true, "pending_authorisation": true, "authorised": true,
+	"captured_awaiting_post": true, "capture_in_flight": true,
+	"captured": true, "settled": true, "disputed": true,
+}
+
+// findDuplicateLevy returns the live payment (if any) that already covers
+// (tinHash, period, monthly) — the cross-channel double-pay guard.
+func (s *PaymentService) findDuplicateLevy(tinHash, period string, monthly bool) (Payment, bool, error) {
+	var all []Payment
+	if err := s.st.List("payments", &all); err != nil {
+		return Payment{}, false, fmt.Errorf("duplicate levy scan: %w", err)
+	}
+	for _, p := range all {
+		if p.TINHash == tinHash && p.Period == period && p.Monthly == monthly && duplicateLevyStatuses[p.Status] {
+			return p, true, nil
+		}
+	}
+	return Payment{}, false, nil
 }
 
 // CreateIntent enforces the presumptive gate, evaluates the band engine and
@@ -275,6 +312,19 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	if in.Period == "" {
 		in.Period = fmt.Sprint(timeNowYear())
 	}
+	// R4-S1b#9: cross-channel (tin, period, instalment-class) uniqueness.
+	// The lock spans the scan AND the payment create below so concurrent
+	// intents from different channels/keys can never both pass the scan.
+	// (Same-key replays already returned inside the claim block above.)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if dup, found, err := s.findDuplicateLevy(in.TINHash, in.Period, in.Monthly); err != nil {
+		releaseClaim()
+		return Payment{}, err
+	} else if found {
+		releaseClaim()
+		return Payment{}, fmt.Errorf("%w (existing payment %s, status %s)", ErrDuplicateLevy, dup.ID, dup.Status)
+	}
 	eval := s.engine.Evaluate(in.State, in.TradeCategory, in.AnnualTurnoverKobo, false, 0)
 	if eval.Exempt {
 		releaseClaim()
@@ -313,6 +363,7 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 		AmountKobo:      amount,
 		Currency:        "NGN",
 		Period:          in.Period,
+		Monthly:         in.Monthly,
 		Provider:        in.Provider,
 		Status:          "intent",
 		RulePackVersion: eval.PackID + "@" + eval.PackVersion,
