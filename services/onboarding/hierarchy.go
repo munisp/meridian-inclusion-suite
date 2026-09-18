@@ -113,8 +113,7 @@ func (h *Hierarchy) Ancestors(id string) ([]Agent, error) {
 			return nil, ErrHierarchyCycle
 		}
 		seen[parent.ID] = true
-		out = append(out, anc)
-		_ = anc
+		out = append(out, parent)
 		cur = parent
 	}
 	return out, nil
