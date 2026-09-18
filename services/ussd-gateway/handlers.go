@@ -30,7 +30,16 @@ type server struct {
 	store    SessionStore
 	bus      events.Bus
 	notifier *AggregatorNotifier // nil in dev (USSD_AGGREGATOR_URL unset)
-	mu       sync.Mutex          // serialize per-session processing in dev
+	// R4-S3#16: per-session keyed locks. The old single global mutex was
+	// held across the whole engine.Handle call — including ~15s upstream
+	// onboarding/presumptive round-trips — so ONE slow session head-of-line
+	// blocked every concurrent USSD session (trivial DoS via a handful of
+	// concurrent dials). Locks are keyed by MSISDN (falling back to the
+	// session id): keying by session id alone would still let two redials
+	// from the same phone race the resume check-then-act, while distinct
+	// phones now proceed fully concurrently.
+	mu           sync.Mutex // guards sessionLocks only (never held across I/O)
+	sessionLocks map[string]*sync.Mutex
 	// guard is the webhook replay guard (M-1): X-Aggregator-Timestamp
 	// within ±5 min + X-Aggregator-Nonce replay cache. Nil-safe: when nil
 	// the check is skipped (unit tests constructing bare servers).
@@ -66,11 +75,34 @@ func (s *server) routes() *http.ServeMux {
 	return mux.ServeMux
 }
 
-// processInput runs one input against the session (creating it on first use)
-// and returns the USSD response text with CON/END prefix.
-func (s *server) processInput(sessionID, phone, input string) string {
+// lockFor returns the keyed mutex for one session's processing. The guard
+// mutex is held only for the map lookup — never across I/O.
+func (s *server) lockFor(key string) *sync.Mutex {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sessionLocks == nil {
+		s.sessionLocks = map[string]*sync.Mutex{}
+	}
+	l, ok := s.sessionLocks[key]
+	if !ok {
+		l = &sync.Mutex{}
+		s.sessionLocks[key] = l
+	}
+	return l
+}
+
+// processInput runs one input against the session (creating it on first use)
+// and returns the USSD response text with CON/END prefix. Serialization is
+// per-MSISDN (R4-S3#16): concurrent sessions from different phones never
+// block each other on a slow upstream call.
+func (s *server) processInput(sessionID, phone, input string) string {
+	key := phone
+	if key == "" {
+		key = sessionID
+	}
+	l := s.lockFor(key)
+	l.Lock()
+	defer l.Unlock()
 	sess, ok := s.store.Get(sessionID)
 	if !ok {
 		// Resume handling (audit fix #8): a redial from the same MSISDN with a
