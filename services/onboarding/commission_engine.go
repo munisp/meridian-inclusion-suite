@@ -26,9 +26,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
@@ -57,7 +60,7 @@ type commissionPack struct {
 
 // commissionRecordTTL bounds how long a durable commission record stays
 // authoritative for idempotent replay (mirrors the payout-marker TTL).
-const commissionRecordTTL = 7 * 24 * time.Hour
+const commissionRecordTTL = 35 * 24 * time.Hour // R4-S3#15: monthly period + margin (was 7d — expiry enabled replay over-funding)
 
 // ErrCommissionConflict is returned when an idempotency key is replayed with
 // a different payload (payload-hash binding violation).
@@ -76,11 +79,17 @@ type CommissionRecord struct {
 	AccountID       string `json:"account_id"`  // agent commission payable account
 	HoldTransferID  string `json:"hold_transfer_id"`
 	PostTransferID  string `json:"post_transfer_id,omitempty"`
-	Status          string `json:"status"` // posted
+	Status          string `json:"status"` // posted|clawed_back
 	PayloadHash     string `json:"payload_hash"`
 	RulePackVersion string `json:"rule_pack_version"`
-	CreatedAt       string `json:"created_at"`
-	ExpiresAt       string `json:"expires_at"`
+	// R4-S3#15 clawback: a refunded/voided source payment reverses the
+	// commission from the agent's payable account back into the pool,
+	// idempotently (deterministic reversal id + terminal status).
+	ClawbackTransferID string `json:"clawback_transfer_id,omitempty"`
+	ClawbackReason     string `json:"clawback_reason,omitempty"`
+	ClawedBackAt       string `json:"clawed_back_at,omitempty"`
+	CreatedAt          string `json:"created_at"`
+	ExpiresAt          string `json:"expires_at"`
 }
 
 // CommissionEngine computes and posts hierarchy commissions.
@@ -94,15 +103,69 @@ type CommissionEngine struct {
 
 // LoadCommissionEngine builds the engine from the embedded fallback pack,
 // honouring COMMISSION_PACK_VERSION (fail-closed on an unknown version).
+// commissionPackPath resolves the canonical rp-commissions-ng location:
+// COMMISSION_PACK_FILE, else RULE_PACKS_DIR/rp-commissions-ng.json
+// ("" = embedded fallback only). The canonical signed YAML pack is published
+// to the meridian-rule-packs repo (id rp-commissions-ng); this loader
+// consumes its JSON mirror from the pack mount.
+func commissionPackPath() string {
+	if p := os.Getenv("COMMISSION_PACK_FILE"); p != "" {
+		return p
+	}
+	if d := os.Getenv("RULE_PACKS_DIR"); d != "" {
+		return filepath.Join(d, "rp-commissions-ng.json")
+	}
+	return ""
+}
+
+// commissionPackRequired reports whether the canonical pack is mandatory
+// (fail closed when absent): prod profile or COMMISSION_PACK_REQUIRED=true.
+func commissionPackRequired() bool {
+	if strings.EqualFold(os.Getenv("COMMISSION_PACK_REQUIRED"), "true") {
+		return true
+	}
+	p := strings.ToLower(os.Getenv("APP_PROFILE"))
+	if p == "prod" || p == "production" {
+		return true
+	}
+	return strings.EqualFold(os.Getenv("PROFILE"), "prod")
+}
+
+// LoadCommissionEngine loads the commission bps table from the CANONICAL
+// rp-commissions-ng pack (COMMISSION_PACK_FILE / RULE_PACKS_DIR). The
+// embedded copy is the offline/dev fallback ONLY (kept byte-identical to
+// the canonical pack, mirroring the presumptive band-engine pattern). In
+// prod profile (or COMMISSION_PACK_REQUIRED=true) a missing/unreadable
+// canonical pack fails closed: commissions never accrue against an
+// unverifiable table.
 func LoadCommissionEngine(st *store.Store, h *Hierarchy, lc ledger.Client) (*CommissionEngine, error) {
+	raw := commissionPackJSON
+	source := "embedded-fallback"
+	if path := commissionPackPath(); path != "" {
+		if b, err := os.ReadFile(path); err != nil {
+			if commissionPackRequired() {
+				return nil, fmt.Errorf("canonical commission pack %s unreadable: %w (fail closed)", path, err)
+			}
+			log.Printf("commission pack: canonical pack %s unavailable (%v); using embedded fallback (dev/offline only)", path, err)
+		} else {
+			raw = b
+			source = path
+		}
+	} else if commissionPackRequired() {
+		return nil, fmt.Errorf("canonical commission pack required (COMMISSION_PACK_FILE/RULE_PACKS_DIR unset); refusing embedded fallback in prod (fail closed)")
+	}
 	var p commissionPack
-	if err := json.Unmarshal(commissionPackJSON, &p); err != nil {
-		return nil, fmt.Errorf("embedded commission pack: %w", err)
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("commission pack decode (%s): %w", source, err)
+	}
+	if p.ID != "rp-commissions-ng" {
+		return nil, fmt.Errorf("unexpected commission pack id %q (%s)", p.ID, source)
 	}
 	if want := os.Getenv("COMMISSION_PACK_VERSION"); want != "" && want != p.Version {
-		return nil, fmt.Errorf("COMMISSION_PACK_VERSION=%s not carried by this build (embedded fallback %s@%s); refusing to compute commissions against an unverified table",
-			want, p.ID, p.Version)
+		return nil, fmt.Errorf("COMMISSION_PACK_VERSION=%s not carried by the loaded pack (%s@%s from %s); refusing to compute commissions against an unverified table",
+			want, p.ID, p.Version, source)
 	}
+	log.Printf("commission pack: loaded %s@%s from %s", p.ID, p.Version, source)
 	e := &CommissionEngine{st: st, hierarchy: h, ledger: lc, pack: p, rates: map[int]uint64{}}
 	for _, l := range p.Rules.Levels {
 		if l.Level < 1 || l.Level > maxAgentDepth {
@@ -122,8 +185,12 @@ func (e *CommissionEngine) PackVersion() string { return e.pack.ID + "@" + e.pac
 // computeKobo applies a bps rate to a kobo amount with integer math only.
 func computeKobo(baseKobo, rateBPS uint64) uint64 { return baseKobo * rateBPS / 10000 }
 
-// recordKey is the durable idempotency key: (reference, level).
-func recordKey(reference string, level int) string { return fmt.Sprintf("%s:%d", reference, level) }
+// recordKey is the durable idempotency key: (tenant, reference, level).
+// R4-S3#15: tenant-bound so the same reference can never collide or replay
+// across tenants sharing the global pool.
+func recordKey(tenant, reference string, level int) string {
+	return fmt.Sprintf("%s:%s:%d", tenant, reference, level)
+}
 
 // payloadHash binds the idempotency key to the full computation payload.
 func payloadHash(agentID, reference string, level int, rateBPS, baseKobo, amountKobo uint64, packVersion string) string {
@@ -143,10 +210,10 @@ func commissionRecordExpired(rec CommissionRecord, now time.Time) bool {
 	return false
 }
 
-// liveRecord returns the unexpired record for (reference, level), if any.
-func (e *CommissionEngine) liveRecord(reference string, level int) (CommissionRecord, bool, error) {
+// liveRecord returns the unexpired record for (tenant, reference, level).
+func (e *CommissionEngine) liveRecord(tenant, reference string, level int) (CommissionRecord, bool, error) {
 	var rec CommissionRecord
-	ok, err := e.st.Get("commission_records", recordKey(reference, level), &rec)
+	ok, err := e.st.Get("commission_records", recordKey(tenant, reference, level), &rec)
 	if err != nil || !ok {
 		return CommissionRecord{}, false, err
 	}
@@ -240,7 +307,7 @@ func (e *CommissionEngine) Accrue(agentID, reference string, baseKobo uint64) ([
 		return nil, err
 	}
 	if _, err := e.ledger.Transfer(ledger.Transfer{
-		ID:             ledger.DeterministicTransferID("comm-accrue-fund:" + reference + ":" + fmt.Sprint(total)),
+		ID:             ledger.DeterministicTransferID("comm-accrue-fund:" + agent.TenantID + ":" + reference + ":" + fmt.Sprint(total)),
 		DebitAccountID: treasuryID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
 		Code: ledger.CodeTopup, Amount: total, UserData: "commission-funding:" + reference,
 	}); err != nil {
@@ -270,11 +337,16 @@ func (e *CommissionEngine) accrueOne(agent Agent, reference string, level int, b
 	amount := computeKobo(baseKobo, bps)
 	hash := payloadHash(agent.ID, reference, level, bps, baseKobo, amount, e.PackVersion())
 
-	if existing, ok, err := e.liveRecord(reference, level); err != nil {
+	if existing, ok, err := e.liveRecord(agent.TenantID, reference, level); err != nil {
 		return CommissionRecord{}, err
 	} else if ok {
 		if existing.PayloadHash != hash {
 			return CommissionRecord{}, ErrCommissionConflict
+		}
+		// R4-S3#15: a clawed-back record is TERMINAL — a replay of the
+		// (refunded/voided) source payment must never re-accrue.
+		if existing.Status == "clawed_back" {
+			return existing, nil
 		}
 		if existing.Status == "posted" && existing.PostTransferID != "" {
 			if _, lerr := e.ledger.LookupTransfer(existing.PostTransferID); lerr == nil {
@@ -290,8 +362,8 @@ func (e *CommissionEngine) accrueOne(agent Agent, reference string, level int, b
 	if err != nil {
 		return CommissionRecord{}, err
 	}
-	holdID := ledger.DeterministicTransferID(fmt.Sprintf("comm-hold:%s:%d", reference, level))
-	postID := ledger.DeterministicTransferID(fmt.Sprintf("comm-post:%s:%d", reference, level))
+	holdID := ledger.DeterministicTransferID(fmt.Sprintf("comm-hold:%s:%s:%d", agent.TenantID, reference, level))
+	postID := ledger.DeterministicTransferID(fmt.Sprintf("comm-post:%s:%s:%d", agent.TenantID, reference, level))
 	posted := false
 	if _, err := e.ledger.PendingTransfer(ledger.Transfer{
 		ID: holdID, DebitAccountID: poolID, CreditAccountID: acctID, Ledger: ledger.LedgerCommissions,
@@ -314,12 +386,12 @@ func (e *CommissionEngine) accrueOne(agent Agent, reference string, level int, b
 		if _, err := e.ledger.PostPendingAs(holdID, postID, amount); err != nil {
 			_, _ = e.ledger.VoidPending(holdID) // compensation
 			// belt-and-braces: never leave a posted record for an unposted hold
-			_, _ = e.st.Delete("commission_records", recordKey(reference, level))
+			_, _ = e.st.Delete("commission_records", recordKey(agent.TenantID, reference, level))
 			return CommissionRecord{}, fmt.Errorf("commission post: %w", err)
 		}
 	}
 	rec := CommissionRecord{
-		ID:        "cm_" + ledger.DeterministicTransferID(recordKey(reference, level))[:24],
+		ID:        "cm_" + ledger.DeterministicTransferID(recordKey(agent.TenantID, reference, level))[:24],
 		Reference: reference, Level: level, AgentID: agent.ID, TenantID: agent.TenantID,
 		RateBPS: bps, BaseKobo: baseKobo, AmountKobo: amount, AccountID: acctID,
 		HoldTransferID: holdID, PostTransferID: postID, Status: "posted",
@@ -328,12 +400,67 @@ func (e *CommissionEngine) accrueOne(agent Agent, reference string, level int, b
 		ExpiresAt: time.Now().Add(commissionRecordTTL).UTC().Format(time.RFC3339),
 	}
 	// Post -> mark: the durable record is written only after the post landed.
-	if err := e.st.Put("commission_records", recordKey(reference, level), rec); err != nil {
+	if err := e.st.Put("commission_records", recordKey(agent.TenantID, reference, level), rec); err != nil {
 		// Post landed under a deterministic id; a replay re-runs the saga
 		// idempotently and re-attempts the mark — no double-post.
 		return CommissionRecord{}, fmt.Errorf("commission mark: %w", err)
 	}
 	return rec, nil
+}
+
+// Clawback reverses every posted commission accrued against a refunded or
+// voided source payment: the amount moves from the agent's payable account
+// back into the pool under a deterministic reversal id, and the record is
+// marked clawed_back (terminal — a later replay of the reference can never
+// re-accrue). Fully idempotent: already-clawed records are returned as-is
+// and the reversal transfer id replays at the ledger (R4-S3#15).
+// tenant scopes the clawback: records belonging to another tenant are never
+// touched.
+func (e *CommissionEngine) Clawback(tenant, reference, reason string) ([]CommissionRecord, error) {
+	if reference == "" {
+		return nil, fmt.Errorf("reference is required")
+	}
+	var all []CommissionRecord
+	if err := e.st.List("commission_records", &all); err != nil {
+		return nil, err
+	}
+	out := []CommissionRecord{}
+	for _, rec := range all {
+		if rec.Reference != reference {
+			continue
+		}
+		if tenant != "" && rec.TenantID != tenant {
+			continue // cross-tenant records are untouchable
+		}
+		if rec.Status == "clawed_back" {
+			out = append(out, rec) // idempotent replay
+			continue
+		}
+		if rec.Status != "posted" {
+			continue
+		}
+		poolID, acctID, err := e.ensureAccounts(rec.AgentID)
+		if err != nil {
+			return out, err
+		}
+		revID := ledger.DeterministicTransferID(fmt.Sprintf("comm-clawback:%s:%s:%d", rec.TenantID, reference, rec.Level))
+		if _, err := e.ledger.Transfer(ledger.Transfer{
+			ID: revID, DebitAccountID: acctID, CreditAccountID: poolID, Ledger: ledger.LedgerCommissions,
+			Code: ledger.CodeVoid, Amount: rec.AmountKobo,
+			UserData: fmt.Sprintf("commission-clawback:%s:%s:L%d", reference, rec.AgentID, rec.Level),
+		}); err != nil && !errors.Is(err, ledger.ErrTransferIDConflict) {
+			return out, fmt.Errorf("clawback reversal L%d agent %s: %w", rec.Level, rec.AgentID, err)
+		}
+		rec.Status = "clawed_back"
+		rec.ClawbackTransferID = revID
+		rec.ClawbackReason = reason
+		rec.ClawedBackAt = nowRFC3339()
+		if err := e.st.Put("commission_records", recordKey(rec.TenantID, reference, rec.Level), rec); err != nil {
+			return out, fmt.Errorf("clawback mark: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, nil
 }
 
 // RecordsFor returns the unexpired commission records earned by agentID
@@ -405,6 +532,38 @@ func (s *server) accrueCommission(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"records": recs, "count": len(recs), "rule_pack_version": s.commissions.PackVersion(),
+	})
+}
+
+// clawbackCommission handles POST /v1/commissions/clawback. Back-office
+// roles only, tenant-scoped: reverses every posted commission accrued
+// against a refunded/voided source payment back into the pool,
+// idempotently (R4-S3#15).
+func (s *server) clawbackCommission(w http.ResponseWriter, r *http.Request) {
+	if !backOfficeRole(r) {
+		httpx.WriteProblem(w, http.StatusForbidden, "forbidden",
+			"commission clawback requires admin/operator role")
+		return
+	}
+	var in struct {
+		Reference string `json:"reference"`
+		Reason    string `json:"reason"`
+	}
+	if err := httpx.DecodeJSON(r, &in); err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if in.Reference == "" {
+		httpx.WriteProblem(w, http.StatusBadRequest, "validation", "reference is required")
+		return
+	}
+	recs, err := s.commissions.Clawback(requestTenant(r), in.Reference, in.Reason)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusUnprocessableEntity, "clawback_error", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"clawed_back": recs, "count": len(recs), "rule_pack_version": s.commissions.PackVersion(),
 	})
 }
 

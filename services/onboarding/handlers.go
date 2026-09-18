@@ -49,6 +49,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/agents/{id}/parent", s.attachSubAgent)
 	mux.HandleFunc("GET /v1/agents/{id}/downline", s.agentDownline)
 	mux.HandleFunc("POST /v1/commissions/accrue", s.accrueCommission)
+	mux.HandleFunc("POST /v1/commissions/clawback", s.clawbackCommission)
 	mux.HandleFunc("GET /v1/agents/{id}/commissions", s.agentCommissionRecords)
 
 	mux.HandleFunc("POST /v1/operators/{id}/documents/presign", s.presignDoc)

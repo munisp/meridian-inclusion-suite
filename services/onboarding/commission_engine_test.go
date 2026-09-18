@@ -166,7 +166,7 @@ func TestCommissionReplayOnlyIfPosted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate crash-after-post: drop the durable record, keep the ledger.
-	if _, err := eng.st.Delete("commission_records", recordKey("txn-crash", 1)); err != nil {
+	if _, err := eng.st.Delete("commission_records", recordKey("t1", "txn-crash", 1)); err != nil {
 		t.Fatal(err)
 	}
 	balBefore, _ := lc.Balance(commissionAccountID(ag.ID))
