@@ -155,7 +155,7 @@ type PaymentService struct {
 }
 
 func NewPaymentService(st *store.Store, lc ledger.Client, hub *PSSPHub, eng *BandEngine, gates *GateClient, certs *CertificateService, bus events.Bus) *PaymentService {
-	return &PaymentService{st: st, lc: lc, hub: hub, engine: engine, gates: gates, certs: certs, bus: bus}
+	return &PaymentService{st: st, lc: lc, hub: hub, engine: eng, gates: gates, certs: certs, bus: bus}
 }
 
 func (s *PaymentService) collectionsAccountID() (string, error) {
