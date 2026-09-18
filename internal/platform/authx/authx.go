@@ -260,7 +260,7 @@ func (v *Verifier) Verify(token string) (*Claims, error) {
 		return nil, errors.New("authx: token expired or missing exp")
 	}
 	if v.cfg.Audience != "" && !audMatches(c.Audience, v.cfg.Audience) {
-		return nil, fmt.Errorf("authx: audience mismatch")
+		return nil, errors.New("authx: audience mismatch")
 	}
 	c.Roles = realmRoles(claims, v.cfg.Audience)
 	return c, nil
