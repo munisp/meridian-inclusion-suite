@@ -96,20 +96,48 @@ func (w *PSMWorkflows) PaymentFlow(input map[string]any) PSMWorkflowRun {
 			AnnualTurnoverKobo: uintOf(input, "annual_turnover_kobo"),
 			Period:             strOf(input, "period"),
 			Provider:           strOf(input, "provider"),
+			Monthly:            input["monthly"] == true,
+			// R4-S1b#1: the channel threads a deterministic idempotency key
+			// (e.g. USSD derives it from MSISDN+TIN+period+levy) so a redial
+			// resumes the SAME payment instead of opening a second capture.
+			IdempotencyKey: strOf(input, "idempotency_key"),
 		}
 		p, err := w.pay.CreateIntent(in)
 		if err != nil {
 			return err
 		}
-		w.step(run, "intent %s created: %d kobo via %s (pending transfer %s)", p.ID, p.AmountKobo, p.Provider, p.PendingTransferID[:12])
-		p, auth, err := w.pay.Authorise(p.ID)
-		if err != nil {
-			return err
+		// R4-S1b#1 resume semantics: an idempotent replay can return the
+		// original payment in ANY mid-flight state. Resume where it left off
+		// instead of failing "cannot authorise" on the redial.
+		switch p.Status {
+		case "captured", "settled":
+			// Full replay: certificate issuance is deterministic per payment,
+			// so re-issue replays the stored certificate — never a second one.
+			cert, cerr := w.pay.certs.Issue(p)
+			if cerr != nil {
+				return cerr
+			}
+			w.step(run, "idempotent replay: payment %s already captured; certificate %s", p.ID, cert.Serial)
+			run.Result = map[string]any{"payment": p, "certificate": cert}
+			return nil
+		case "authorised":
+			w.step(run, "resuming payment %s after session drop (already authorised, ref %s)", p.ID, p.PSSPRef)
+		case "pending_authorisation", "intent":
+			w.step(run, "intent %s created: %d kobo via %s (pending transfer %s)", p.ID, p.AmountKobo, p.Provider, p.PendingTransferID[:12])
+			var auth AuthoriseResponse
+			p, auth, err = w.pay.Authorise(p.ID)
+			if err != nil {
+				return err
+			}
+			if auth.Status != "authorised" {
+				return fmt.Errorf("authorisation failed: %s", auth.Detail)
+			}
+			w.step(run, "authorised by %s ref %s", p.Provider, auth.Reference)
+		default:
+			// captured_awaiting_post / capture_in_flight: the recovery
+			// sweeper owns these states — never double-drive the saga.
+			return fmt.Errorf("payment %s is %s; the recovery sweeper will resolve it — safe to retry later", p.ID, p.Status)
 		}
-		if auth.Status != "authorised" {
-			return fmt.Errorf("authorisation failed: %s", auth.Detail)
-		}
-		w.step(run, "authorised by %s ref %s", p.Provider, auth.Reference)
 		p, cert, err := w.pay.Capture(p.ID)
 		if err != nil {
 			return err
