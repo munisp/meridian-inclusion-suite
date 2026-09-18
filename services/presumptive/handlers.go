@@ -132,7 +132,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/pssps", s.listPSSPs)
 	mux.HandleFunc("GET /v1/pssps/{id}", s.getPSSP)
 	mux.HandleFunc("POST /v1/pssps/{id}/rotate-secret", requireRole(s.rotatePSSPSecret, "admin"))
-	mux.HandleFunc("POST /v1/pssps/{id}/status", requireRole(s.setPSSPSecret, "admin"))
+	mux.HandleFunc("POST /v1/pssps/{id}/status", requireRole(s.setPSSPStatus, "admin"))
 
 	// certificates (public verify, rate-limited)
 	mux.HandleFunc("GET /v1/certificates/verify/{serial}", s.verifyCertificate)
