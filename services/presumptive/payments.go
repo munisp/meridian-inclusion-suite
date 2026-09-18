@@ -390,6 +390,20 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 	p.PendingTransferID = ptID
 	p.Status = "pending_authorisation"
 	if err := s.st.Put("payments", p.ID, p); err != nil {
+		if store.IsUniqueViolation(err) {
+			// R4-9b: the meridian_payments_levy_uniq partial UNIQUE index is
+			// the cross-replica enforcer of (tenant, tin, period, instalment
+			// class) uniqueness — a concurrent CreateIntent on ANOTHER
+			// replica won the insert. Map SQLSTATE 23505 onto the same 409
+			// the in-process fast path returns.
+			if s.lc != nil {
+				if _, verr := s.lc.VoidPending(ptID); verr != nil {
+					log.Printf("compensating void of orphaned hold %s (payment %s rejected by levy unique index) FAILED: %v — hold requires ops sweep", ptID, p.ID, verr)
+				}
+			}
+			releaseClaim()
+			return Payment{}, fmt.Errorf("%w (concurrent create rejected by database unique index)", ErrDuplicateLevy)
+		}
 		// V2 repair (B3 #7 residual): the hold landed but the payment row
 		// did not — without a compensating void the hold on ptID would be
 		// orphaned forever (no payment row references it, no sweeper). Void

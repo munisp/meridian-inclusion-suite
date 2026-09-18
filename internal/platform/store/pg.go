@@ -9,21 +9,58 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// IsUniqueViolation reports whether err is a Postgres unique-constraint
+// violation (SQLSTATE 23505) — e.g. a second live payment hitting the
+// meridian_payments_levy_uniq partial index. Services map this onto their
+// domain 409 errors (R4-9b).
+func IsUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// IsPostgres reports whether the store is backed by Postgres (DATABASE_URL
+// profile); services use it to select the transactional code paths that
+// only exist on the pg backend.
+func (s *Store) IsPostgres() bool { return s.pool != nil }
 
 // Postgres backend (H1/H3): when DATABASE_URL is set the same Store API is
 // served by a pgx/v5 pool over a single jsonb documents table — the storage
 // model mirrors the embedded JSON store exactly (collections of keyed JSON
 // documents), so no behaviour changes between dev and prod profiles.
 
+// pgDDL is the idempotent, auto-migrated schema (the repo's migration
+// convention: IF NOT EXISTS DDL applied at OpenPostgres startup; there are
+// no external migration files). Statements:
+//  1. the documents table itself;
+//  2. R4-9b: a partial UNIQUE index enforcing cross-channel presumptive
+//     levy uniqueness at the DATABASE layer — one live (pending-or-posted)
+//     payment per (tenant, tin, period, instalment class). The status set
+//     mirrors presumptive.duplicateLevyStatuses exactly. The per-process
+//     mutex in CreateIntent stays as the fast path / nicer error, but only
+//     this index serialises concurrent creates across replicas sharing one
+//     Postgres. tenant_id is not yet a Payment field; COALESCE keeps the
+//     key stable for forward compatibility (single-tenant rows hash to '').
 const pgDDL = `CREATE TABLE IF NOT EXISTS meridian_docs (
 	collection TEXT NOT NULL,
 	id         TEXT NOT NULL,
 	doc        JSONB NOT NULL,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	PRIMARY KEY (collection, id)
-)`
+);
+CREATE UNIQUE INDEX IF NOT EXISTS meridian_payments_levy_uniq ON meridian_docs (
+	(COALESCE(doc->>'tenant_id', '')),
+	(doc->>'tin_hash'),
+	(doc->>'period'),
+	(COALESCE(doc->>'monthly', 'false'))
+) WHERE collection = 'payments' AND doc->>'status' IN (
+	'intent', 'pending_authorisation', 'authorised',
+	'captured_awaiting_post', 'capture_in_flight',
+	'captured', 'settled', 'disputed'
+);`
 
 func (s *Store) pgPut(coll, id string, v any) error {
 	b, err := json.Marshal(v)

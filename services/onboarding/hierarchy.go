@@ -18,14 +18,27 @@ package main
 //     agent whose id equals their authenticated identity.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
+	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
+
+// agentReader is the read surface Attach's validation runs against: the
+// AgentRegistry directly (embedded backend) or a Postgres-transaction-backed
+// adapter (prod), so cycle/depth checks observe the same snapshot as the
+// locked rows and the parent-link write.
+type agentReader interface {
+	Get(id string) (Agent, bool, error)
+	List() ([]Agent, error)
+}
 
 // DefaultTenant is assigned to agents registered without an explicit tenant.
 const DefaultTenant = "default"
@@ -56,8 +69,8 @@ type Hierarchy struct {
 
 func NewHierarchy(agents *AgentRegistry) *Hierarchy { return &Hierarchy{agents: agents} }
 
-func (h *Hierarchy) get(id string) (Agent, error) {
-	ag, ok, err := h.agents.Get(id)
+func agentByID(r agentReader, id string) (Agent, error) {
+	ag, ok, err := r.Get(id)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -67,12 +80,16 @@ func (h *Hierarchy) get(id string) (Agent, error) {
 	return ag, nil
 }
 
+func (h *Hierarchy) get(id string) (Agent, error) { return agentByID(h.agents, id) }
+
 // Depth returns the number of edges from id up to its subtree root, following
 // ParentID links. A corrupted link (missing parent) stops the walk; a stored
 // cycle (should never happen — Attach rejects them) is bounded.
-func (h *Hierarchy) Depth(id string) (int, error) {
+func (h *Hierarchy) Depth(id string) (int, error) { return depthOf(h.agents, id) }
+
+func depthOf(r agentReader, id string) (int, error) {
 	depth := 0
-	cur, err := h.get(id)
+	cur, err := agentByID(r, id)
 	if err != nil {
 		return 0, err
 	}
@@ -82,7 +99,7 @@ func (h *Hierarchy) Depth(id string) (int, error) {
 		if depth > maxAgentDepth+1 { // belt-and-braces bound
 			return depth, ErrHierarchyCycle
 		}
-		parent, err := h.get(cur.ParentID)
+		parent, err := agentByID(r, cur.ParentID)
 		if err != nil {
 			return depth, nil // dangling parent link: treat as root
 		}
@@ -121,12 +138,14 @@ func (h *Hierarchy) Ancestors(id string) ([]Agent, error) {
 
 // Subtree returns id plus all of its descendants (tenant-consistent by
 // construction — Attach enforces a single tenant per subtree).
-func (h *Hierarchy) Subtree(id string) ([]Agent, error) {
-	root, err := h.get(id)
+func (h *Hierarchy) Subtree(id string) ([]Agent, error) { return subtreeOf(h.agents, id) }
+
+func subtreeOf(r agentReader, id string) ([]Agent, error) {
+	root, err := agentByID(r, id)
 	if err != nil {
 		return nil, err
 	}
-	all, err := h.agents.List()
+	all, err := r.List()
 	if err != nil {
 		return nil, err
 	}
@@ -165,19 +184,41 @@ func (h *Hierarchy) Subtree(id string) ([]Agent, error) {
 // via Depth, then the Put) runs under h.mu so a concurrent Attach can never
 // interleave between the checks and the write — a cycle can no longer be
 // stored by racing re-parents.
+//
+// R4-9b: h.mu is per-PROCESS — replicas sharing one Postgres could still
+// interleave. On the Postgres backend Attach therefore runs inside a single
+// DB transaction that row-locks the child and parent agent rows with
+// SELECT ... FOR UPDATE in id-sorted (deadlock-free) order and performs all
+// cycle/depth validation against the same transaction snapshot before
+// writing. Concurrent cross-attaches (A→B while B→A) now serialise at the
+// database: the loser re-reads the winner's committed links and its cycle
+// check rejects the move. The mutex stays as the in-process fast path and
+// as the enforcer on the embedded dev backend.
 func (h *Hierarchy) Attach(childID, parentID string) (Agent, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	child, err := h.get(childID)
+	if h.agents.st.IsPostgres() {
+		return h.attachPostgres(childID, parentID)
+	}
+	return h.attachChecked(h.agents, childID, parentID,
+		func(ag Agent) error { return h.agents.st.Put("agents", ag.ID, ag) })
+}
+
+// attachChecked is the shared check-then-act: tenant, cycle and depth
+// validation against reader r, then the parent-link write via put. r and
+// put MUST be atomic with respect to other attaches (in-process mutex on
+// the embedded backend; one DB transaction with locked rows on Postgres).
+func (h *Hierarchy) attachChecked(r agentReader, childID, parentID string, put func(Agent) error) (Agent, error) {
+	child, err := agentByID(r, childID)
 	if err != nil {
 		return Agent{}, err
 	}
 	if parentID == "" {
 		child.ParentID = ""
 		child.UpdatedAt = nowRFC3339()
-		return child, h.agents.st.Put("agents", child.ID, child)
+		return child, put(child)
 	}
-	parent, err := h.get(parentID)
+	parent, err := agentByID(r, parentID)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -188,7 +229,7 @@ func (h *Hierarchy) Attach(childID, parentID string) (Agent, error) {
 		return Agent{}, ErrHierarchyCycle
 	}
 	// Cycle check: the new parent must not sit inside the child's subtree.
-	sub, err := h.Subtree(childID)
+	sub, err := subtreeOf(r, childID)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -198,7 +239,7 @@ func (h *Hierarchy) Attach(childID, parentID string) (Agent, error) {
 		}
 	}
 	// Depth check: parent depth + child subtree height must stay within cap.
-	parentDepth, err := h.Depth(parentID)
+	parentDepth, err := depthOf(r, parentID)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -208,7 +249,73 @@ func (h *Hierarchy) Attach(childID, parentID string) (Agent, error) {
 	}
 	child.ParentID = parentID
 	child.UpdatedAt = nowRFC3339()
-	return child, h.agents.st.Put("agents", child.ID, child)
+	return child, put(child)
+}
+
+// pgAgentReader adapts a store.PgTx to agentReader so Attach validation
+// reads inside the same transaction (and snapshot) as the row locks.
+type pgAgentReader struct {
+	ctx context.Context
+	tx  *store.PgTx
+}
+
+func (p pgAgentReader) Get(id string) (Agent, bool, error) {
+	var ag Agent
+	ok, err := p.tx.Get(p.ctx, "agents", id, &ag)
+	return ag, ok, err
+}
+
+func (p pgAgentReader) List() ([]Agent, error) {
+	var out []Agent
+	if err := p.tx.List(p.ctx, "agents", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// attachPostgres runs Attach inside one DB transaction with the involved
+// agent rows locked FOR UPDATE in id-sorted order (R4-9b). Under READ
+// COMMITTED a blocked FOR UPDATE re-reads the winner's committed row
+// versions once the lock is granted, and every later statement sees the
+// latest committed data — so the losing cross-attach validates against the
+// post-commit hierarchy and its cycle check fails instead of storing a
+// 2-cycle.
+func (h *Hierarchy) attachPostgres(childID, parentID string) (Agent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tx, err := h.agents.st.BeginTx(ctx)
+	if err != nil {
+		return Agent{}, err
+	}
+	defer tx.Rollback()
+	// Lock the involved rows in deterministic (id-sorted) order: every
+	// Attach transaction requests the same locks in the same order, so
+	// concurrent cross-attaches serialise instead of deadlocking.
+	lockIDs := []string{childID}
+	if parentID != "" && parentID != childID {
+		lockIDs = append(lockIDs, parentID)
+	}
+	sort.Strings(lockIDs)
+	for _, id := range lockIDs {
+		var ag Agent
+		ok, err := tx.GetForUpdate(ctx, "agents", id, &ag)
+		if err != nil {
+			return Agent{}, err
+		}
+		if !ok {
+			return Agent{}, fmt.Errorf("agent %s not found", id)
+		}
+	}
+	reader := pgAgentReader{ctx: ctx, tx: tx}
+	out, err := h.attachChecked(reader, childID, parentID,
+		func(ag Agent) error { return tx.Put(ctx, "agents", ag.ID, ag) })
+	if err != nil {
+		return Agent{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Agent{}, err
+	}
+	return out, nil
 }
 
 // subtreeHeight returns the height (in edges) of the subtree rooted at root,
