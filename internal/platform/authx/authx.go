@@ -259,7 +259,7 @@ func (v *Verifier) Verify(token string) (*Claims, error) {
 		return nil, errors.New("authx: token expired or missing exp")
 	}
 	if v.cfg.Audience != "" && !audMatches(c.Audience, v.cfg.Audience) {
-		return nil, errors.New("authx: audience mismatch")
+		return nil, fmt.Errorf("authx: audience mismatch")
 	}
 	c.Roles = realmRoles(claims, v.cfg.Audience)
 	return c, nil
@@ -283,14 +283,27 @@ const ClaimsKey = "X-Meridian-Caller"
 // comma-joined roles (mirrors ClaimsKey for the subject).
 const RolesKey = "X-Meridian-Roles"
 
+// TenantKey is the header the middleware stamps with the caller's verified
+// tenant (the JWT `tenant_id` claim). R4-S3#1: this header previously was
+// NOT stripped inbound nor re-stamped, so any authenticated caller could
+// assert an arbitrary tenant and act cross-tenant (hierarchy management and
+// commission accrual against another tenant's agents). It is now treated
+// exactly like ClaimsKey/RolesKey: stripped inbound on every path, and set
+// ONLY from the verified token claim (never passed through).
+const TenantKey = "X-Meridian-Tenant"
+
 // identityHeaders are request headers that carry authentication/identity
 // meaning inside the platform. They are ONLY ever set by this middleware
 // (from a verified token) — never accepted from the client. B2 #6: strip
 // them inbound on EVERY path (including public paths) so a forged
 // X-Meridian-Roles / X-Dev-Role cannot reach a handler.
 var identityHeaders = []string{
-	ClaimsKey, RolesKey,
-	"X-Dev-Role", "X-Dev-Subject", "X-Dev-Agent-Id",
+	ClaimsKey, RolesKey, TenantKey,
+	"X-Dev-Role", "X-Dev-Subject", "X-Dev-Agent-Id", "X-Dev-Tenant-Id",
+	// X-Tenant-ID is the legacy alias some edge clients send; it must never
+	// assert tenancy either (otelx reads it, but tenancy authz must only
+	// ever see the middleware-stamped TenantKey).
+	"X-Tenant-ID",
 }
 
 // StripIdentityHeaders removes inbound client-supplied identity headers.
@@ -327,6 +340,13 @@ func Middleware(v *Verifier, publicPath func(string) bool) func(http.Handler) ht
 			// Propagate verified roles so handlers can enforce object- and
 			// role-level authz (audit H-5) without re-verifying the token.
 			r.Header.Set(RolesKey, strings.Join(claims.Roles, ","))
+			// R4-S3#1: stamp the tenant EXCLUSIVELY from the verified claim.
+			// The inbound header was stripped above, so an absent claim
+			// leaves the header empty (handlers then fall back to the
+			// default tenant) — a client can never assert another tenant.
+			if claims.TenantID != "" {
+				r.Header.Set(TenantKey, claims.TenantID)
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
