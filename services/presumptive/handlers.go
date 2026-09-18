@@ -137,8 +137,10 @@ func (s *server) routes() *http.ServeMux {
 	// certificates (public verify, rate-limited)
 	mux.HandleFunc("GET /v1/certificates/verify/{serial}", s.verifyCertificate)
 
-	// device key enrolment + offline receipt verification (audit fix #6)
+	// device key enrolment + offline receipt verification (audit fix #6);
+	// public ed25519 key lookup for third-party receipt verification (S1b#10)
 	mux.HandleFunc("POST /v1/devices/enroll", s.enrollDevice)
+	mux.HandleFunc("GET /v1/devices/{agent}/{device}/publickey", s.devicePublicKey)
 	mux.HandleFunc("POST /v1/receipts/verify", s.verifyReceipt)
 
 	// agent float — B4-2: money movement is operator/admin-only
