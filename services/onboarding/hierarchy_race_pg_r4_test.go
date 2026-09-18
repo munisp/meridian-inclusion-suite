@@ -22,9 +22,38 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
 
+// pgPackageDSN returns a DSN pointing at a per-package test database
+// (created if absent) so packages running in parallel under `go test ./...`
+// never share a meridian_docs table.
+func pgPackageDSN(t *testing.T, dbName string) string {
+	t.Helper()
+	base := os.Getenv("MERIDIAN_TEST_PG_DSN")
+	if base == "" {
+		t.Skip("MERIDIAN_TEST_PG_DSN unset: skipping live-Postgres R4-9b test")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+dbName); err != nil &&
+		!strings.Contains(err.Error(), "42P04") { // duplicate_database
+		t.Fatalf("create test database: %v", err)
+	}
+	// swap the database segment of the DSN (path between host and query)
+	q := strings.Index(base, "?")
+	head, tail := base, ""
+	if q >= 0 {
+		head, tail = base[:q], base[q:]
+	}
+	slash := strings.LastIndex(head, "/")
+	return head[:slash+1] + dbName + tail
+}
+
 func pgHierarchyStores(t *testing.T) (*store.Store, *store.Store) {
 	t.Helper()
-	dsn := os.Getenv("MERIDIAN_TEST_PG_DSN")
+	dsn := pgPackageDSN(t, "meridian_test_onb")
 	poolDSN := dsn
 	if strings.Contains(poolDSN, "?") {
 		poolDSN += "&pool_max_conns=2"

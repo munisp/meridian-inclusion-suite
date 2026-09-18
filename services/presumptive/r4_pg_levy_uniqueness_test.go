@@ -22,11 +22,40 @@ import (
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/store"
 )
 
-// pgLevyStore opens a fresh Postgres-backed store on the test DSN and wipes
-// the documents table so each test starts clean.
+// pgPackageDSN returns a DSN pointing at a per-package test database
+// (created if absent) so packages running in parallel under `go test ./...`
+// never share a meridian_docs table.
+func pgPackageDSN(t *testing.T, dbName string) string {
+	t.Helper()
+	base := os.Getenv("MERIDIAN_TEST_PG_DSN")
+	if base == "" {
+		t.Skip("MERIDIAN_TEST_PG_DSN unset: skipping live-Postgres R4-9b test")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+dbName); err != nil &&
+		!strings.Contains(err.Error(), "42P04") { // duplicate_database
+		t.Fatalf("create test database: %v", err)
+	}
+	// swap the database segment of the DSN (path between host and query)
+	q := strings.Index(base, "?")
+	head, tail := base, ""
+	if q >= 0 {
+		head, tail = base[:q], base[q:]
+	}
+	slash := strings.LastIndex(head, "/")
+	return head[:slash+1] + dbName + tail
+}
+
+// pgLevyStore opens a fresh Postgres-backed store on the per-package test
+// database and wipes the documents table so each test starts clean.
 func pgLevyStore(t *testing.T) *store.Store {
 	t.Helper()
-	dsn := os.Getenv("MERIDIAN_TEST_PG_DSN")
+	dsn := pgPackageDSN(t, "meridian_test_psm")
 	poolDSN := dsn
 	if strings.Contains(poolDSN, "?") {
 		poolDSN += "&pool_max_conns=2"
@@ -78,7 +107,7 @@ func TestR4PGLevyUniqueIndexExists(t *testing.T) {
 	}
 	// OpenPostgres ran the DDL; the partial unique index must exist with the
 	// exact duplicateLevyStatuses predicate set.
-	dsn := os.Getenv("MERIDIAN_TEST_PG_DSN")
+	dsn := pgPackageDSN(t, "meridian_test_psm")
 	poolDSN := dsn
 	if strings.Contains(poolDSN, "?") {
 		poolDSN += "&pool_max_conns=2"
@@ -115,7 +144,7 @@ func TestR4PGLevyUniqueIndexExists(t *testing.T) {
 // ErrDuplicateLevy (mapped from SQLSTATE 23505), never a second payment.
 func TestR4PGConcurrentCrossReplicaDuplicateLevy(t *testing.T) {
 	st1 := pgLevyStore(t) // same DSN -> same database
-	poolDSN := os.Getenv("MERIDIAN_TEST_PG_DSN")
+	poolDSN := pgPackageDSN(t, "meridian_test_psm")
 	if strings.Contains(poolDSN, "?") {
 		poolDSN += "&pool_max_conns=2"
 	} else {
