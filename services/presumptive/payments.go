@@ -316,6 +316,7 @@ func (s *PaymentService) CreateIntent(in IntentRequest) (Payment, error) {
 		Provider:        in.Provider,
 		Status:          "intent",
 		RulePackVersion: eval.PackID + "@" + eval.PackVersion,
+		TurnoverKobo:    in.AnnualTurnoverKobo,
 		CreatedAt:       nowRFC3339(),
 		UpdatedAt:       nowRFC3339(),
 	}
@@ -409,6 +410,41 @@ func (s *PaymentService) Authorise(paymentID string) (Payment, AuthoriseResponse
 	return p, res, nil
 }
 
+// ErrPackChangedMidFlight marks a capture blocked because the rule pack
+// pinned at intent (RulePackVersion + amount) no longer matches the live
+// pack. The payment is parked in capture_in_flight for review; the levy is
+// NEVER settled at a stale amount (R4-S1a#10).
+var ErrPackChangedMidFlight = errors.New("rule pack changed mid-flight; payment parked for review")
+
+// revalidatePack re-runs the band evaluation with the intent-time inputs and
+// compares the outcome against the version+amount pinned at authorise. A
+// pack bump (or amount drift) mid-flight parks the payment instead of
+// settling a stale levy. Called from Capture BEFORE the PSSP capture leg so
+// no money moves against a stale pack.
+func (s *PaymentService) revalidatePack(p *Payment) error {
+	eval := s.engine.Evaluate(p.State, p.TradeCategory, p.TurnoverKobo, false, 0)
+	current := eval.PackID + "@" + eval.PackVersion
+	expected := eval.AnnualLevyKobo
+	if p.Monthly {
+		expected = eval.MonthlyLevyKobo
+	}
+	expected += eval.AdminFeeKobo
+	if current == p.RulePackVersion && expected == p.AmountKobo {
+		return nil
+	}
+	reason := fmt.Sprintf("rule pack changed mid-flight: pinned %s amount %d kobo, current %s amount %d kobo",
+		p.RulePackVersion, p.AmountKobo, current, expected)
+	p.Status = "capture_in_flight"
+	p.FailReason = reason + " — parked for operator review (no money moved)"
+	p.UpdatedAt = nowRFC3339()
+	_ = s.st.Put("payments", p.ID, *p)
+	s.bus.Publish("nrs.psm.payments.alerts.v1", events.New("nrs.psm.payments.alerts.v1", serviceName, "", current, map[string]any{
+		"alert": "pack_changed_mid_flight", "payment_id": p.ID, "pinned": p.RulePackVersion,
+		"pinned_amount_kobo": p.AmountKobo, "current": current, "current_amount_kobo": expected,
+	}))
+	return fmt.Errorf("%w: %s", ErrPackChangedMidFlight, reason)
+}
+
 // Capture captures an authorised payment: PSSP capture + post pending ledger
 // transfer + certificate issuance. SAGA (audit fix #5): after the PSSP
 // capture succeeds the saga persists "captured_awaiting_post"; failures in
@@ -421,6 +457,11 @@ func (s *PaymentService) Capture(paymentID string) (Payment, Certificate, error)
 	}
 	if p.Status != "authorised" {
 		return Payment{}, Certificate{}, fmt.Errorf("payment %s is %s; cannot capture", paymentID, p.Status)
+	}
+	// R4-S1a#10: the pack pinned at intent must still govern this capture —
+	// a mid-flight pack bump parks the payment for review, never settles stale.
+	if err := s.revalidatePack(&p); err != nil {
+		return p, Certificate{}, err
 	}
 	adapter, _ := s.hub.Adapter(p.Provider)
 	// Idempotency-Key on the PSSP capture: the payment id scopes the key so
