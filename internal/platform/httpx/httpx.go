@@ -77,7 +77,7 @@ func Readyz(check func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if check != nil {
 			if err := check(); err != nil {
-				WriteProblem(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
+				WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
 				return
 			}
 		}
@@ -401,7 +401,7 @@ func NewServer(addr string, h http.Handler) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
-		IdleTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
