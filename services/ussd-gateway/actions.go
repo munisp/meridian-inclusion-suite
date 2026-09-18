@@ -353,16 +353,26 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 
 	// psm.pay: collect via presumptive svc when available; else simulate and
 	// issue a locally-signed certificate serial (SMS simulated by transcript).
+	//
+	// R4-S1b#1 idempotency: the payment intent carries a DETERMINISTIC key
+	// derived from MSISDN + TIN + period + levy (NOT the session id — a
+	// redial gets a new session but must resume the same payment). The
+	// presumptive service replays the original payment for a repeated key
+	// and enforces (tin, period, levy) uniqueness across all channels, so
+	// neither a redial nor a POS/PWA double-pay can create a second capture.
 	actions["psm.pay"] = func(sess *Session) error {
 		levy, _ := strconv.ParseUint(sess.Data["levy_kobo"], 10, 64)
 		if levy == 0 {
 			return fmt.Errorf("no levy computed; restart the flow")
 		}
+		period := fmt.Sprint(time.Now().UTC().Year())
+		idemKey := "ussd:" + hmacHex(keyOr("USSD_IDEM_SECRET", "meridian-ussd-idem-dev"),
+			strings.Join([]string{sess.Phone, sess.Data["tin_hash"], period, sess.Data["levy_kobo"]}, "|"))
 		if psmURL != "" {
 			body, _ := json.Marshal(map[string]any{
 				"tin_hash": sess.Data["tin_hash"], "state": sess.Data["state"],
 				"trade_category": sess.Data["trade"], "annual_turnover_kobo": mustU64(sess.Data["turnover_kobo"]),
-				"provider": "flutterwave",
+				"provider": "flutterwave", "period": period, "idempotency_key": idemKey,
 			})
 			req, _ := http.NewRequest(http.MethodPost, psmURL+"/v1/workflows/wf-psm-payment/trigger", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
@@ -393,8 +403,12 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 				}
 			}
 		}
-		// local fallback: simulated authorise->capture + serial
-		seed := sha256.Sum256([]byte(sess.ID + "|" + sess.Data["levy_kobo"]))
+		// local fallback: simulated authorise->capture + serial. R4-S1b#1:
+		// the seed is derived from MSISDN+TIN+period+levy (same inputs as
+		// the idempotency key above), NOT the session id, so a redial of
+		// the interrupted session replays the SAME simulated capture and
+		// certificate instead of minting a second one.
+		seed := sha256.Sum256([]byte(sess.Phone + "|" + sess.Data["tin_hash"] + "|" + period + "|" + sess.Data["levy_kobo"]))
 		sess.Data["pssp_ref"] = "FLW-" + strings.ToUpper(hex.EncodeToString(seed[:8]))
 		sess.Data["cert_serial"] = fmt.Sprintf("PSM-%d-%s", time.Now().UTC().Year(), strings.ToUpper(hex.EncodeToString(seed[8:13])))
 		bus.Publish("nrs.psm.ussd.v1", map[string]any{
