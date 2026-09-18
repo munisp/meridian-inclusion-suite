@@ -400,7 +400,7 @@ type CommissionPayout struct {
 // commissionPayoutTTL bounds how long a per-(agent, period) payout marker
 // stays authoritative for dedup (assurance R4 idempotency TTL item). After
 // it lapses the marker is treated as absent (and becomes purge-eligible).
-const commissionPayoutTTL = 7 * 24 * time.Hour
+const commissionPayoutTTL = 35 * 24 * time.Hour // R4-S3#15: monthly period + margin (was 7d vs a monthly period)
 
 func payoutKey(agentID, period string) string { return agentID + ":" + period }
 
