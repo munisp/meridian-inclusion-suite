@@ -76,7 +76,7 @@ func Readyz(check func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if check != nil {
 			if err := check(); err != nil {
-				WriteProblem(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
+				WriteProblem(w, http.StatusServiceUnavailable, "not_ready", err.Error())
 				return
 			}
 		}
@@ -118,67 +118,33 @@ func MaxBody(next http.Handler) http.Handler {
 }
 
 // allowedOrigins parses CORS_ALLOWED_ORIGINS (comma-separated).
-// Audit M-7: wildcard `*` together with credentialed headers
-// (Authorization) is forbidden. Semantics:
-//   - unset: dev default — reflect the request Origin (dev PWAs on random
-//     localhost ports); in PROFILE=prod this fails closed (deny all).
-//   - set: exact-match allowlist; "*" is honoured only outside prod.
-func allowedOrigins() []string {
-	v := os.Getenv("CORS_ALLOWED_ORIGINS")
-	if v == "" {
-		return nil
-	}
-	var out []string
-	for _, o := range strings.Split(v, ",") {
-		if o = strings.TrimSpace(o); o != "" {
-			out = append(out, o)
+func allowedOrigins() map[string]bool {
+	out := map[string]bool{}
+	for _, o := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			out[o] = true
 		}
 	}
 	return out
 }
 
-func prodProfile() bool {
-	p := os.Getenv("PROFILE")
-	return p == "prod" || p == "production"
-}
-
-// CORS applies the §1.3 CORS policy (audit M-7): origins come from
-// CORS_ALLOWED_ORIGINS; no wildcard with Authorization in prod; prod with
-// no configured origins denies cross-origin browser calls entirely.
+// CORS reflects allow-listed origins from CORS_ALLOWED_ORIGINS. When unset
+// (default), no cross-origin access is allowed — same-origin calls do not
+// need CORS at all. Credentials are only allowed for explicit origins
+// (never "*").
 func CORS(next http.Handler) http.Handler {
-	origins := allowedOrigins()
-	if prodProfile() && len(origins) == 0 {
-		log.Printf("profile=prod component=cors CORS_ALLOWED_ORIGINS unset: FAILING CLOSED (no cross-origin browser access)")
-	}
+	allowed := allowedOrigins()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		allow := ""
-		switch {
-		case len(origins) > 0:
-			for _, o := range origins {
-				if o == "*" && !prodProfile() {
-					allow = "*"
-					break
-				}
-				if o == origin && origin != "" {
-					allow = origin
-					break
-				}
-			}
-		case !prodProfile() && origin != "":
-			allow = origin // dev convenience: reflect localhost dev origins
-		}
-		if allow != "" {
-			w.Header().Set("Access-Control-Allow-Origin", allow)
+		if origin != "" && allowed[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Dev-Role,X-Dev-Agent-Id,Idempotency-Key")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, traceparent, baggage")
 		}
 		if r.Method == http.MethodOptions {
-			if allow == "" && origin != "" {
-				WriteProblem(w, http.StatusForbidden, "cors_denied", "origin not allowed")
-				return
-			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -186,229 +152,131 @@ func CORS(next http.Handler) http.Handler {
 	})
 }
 
-func devSecret() string {
-	if s := os.Getenv("MERIDIAN_DEV_JWT_SECRET"); s != "" {
-		return s
-	}
-	return "meridian-dev-secret"
+// StripIdentityHeaders removes every client-controllable header that could
+// smuggle a tenant or user identity past auth. Called BEFORE any public-path
+// bypass so spoofed headers never reach a handler even on unauthenticated
+// routes (A-4: tenant header spoofing).
+func StripIdentityHeaders(r *http.Request) {
+	r.Header.Del("X-Meridian-Tenant")
+	r.Header.Del("X-Tenant-ID")
+	r.Header.Del("X-Dev-Tenant-Id")
+	r.Header.Del("X-Meridian-User")
+	r.Header.Del("X-User-ID")
+	r.Header.Del("X-Forwarded-User")
 }
 
-// ProdAuthMisconfigured reports whether PROFILE=prod is combined with
-// forgeable dev authentication: AUTH_MODE != keycloak, or the dev JWT
-// secret missing/still the built-in default ("meridian-dev-secret").
-// Callers must fail closed when this is true.
-func ProdAuthMisconfigured() bool {
-	if os.Getenv("PROFILE") != "prod" {
-		return false
+// TenantFromRequest resolves the tenant for this request from the
+// authenticated principal ONLY (authx.TenantKey context value set by
+// authx.Middleware after verifying the bearer token). Client-supplied tenant
+// headers are never honoured here — they were stripped upstream. When no
+// authenticated tenant is present, the defaultTenant fallback is used and
+// stamped, so downstream code sees a consistent, server-controlled value.
+func TenantFromRequest(r *http.Request, defaultTenant string) string {
+	if t, ok := r.Context().Value(authx.TenantKey).(string); ok && t != "" {
+		return t
 	}
-	if os.Getenv("AUTH_MODE") != "keycloak" {
-		return true
+	if defaultTenant == "" {
+		return "default"
 	}
-	return devSecret() == "meridian-dev-secret"
+	return defaultTenant
 }
 
-// validateHS256 validates a dev HS256 JWT and returns its claims.
-func validateHS256(token string) (map[string]any, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, false
+// Auth composes the platform auth middleware: strip spoofable identity
+// headers, authenticate via keycloak JWKS (prod) or the dev HMAC issuer
+// (dev), then stamp the server-verified tenant onto X-Meridian-Tenant for
+// downstream handlers. Public paths (healthz/readyz) bypass the token check
+// but still get header stripping, so a forged tenant header can never reach
+// any handler.
+func Auth(next http.Handler, publicPaths ...string) http.Handler {
+	public := map[string]bool{}
+	for _, p := range publicPaths {
+		public[p] = true
 	}
-	head, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil || !strings.Contains(string(head), "HS256") {
-		return nil, false
-	}
-	mac := hmac.New(sha256.New, []byte(devSecret()))
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || !hmac.Equal(mac.Sum(nil), sig) {
-		return nil, false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, false
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, false
-	}
-	return claims, true
-}
-
-// Auth implements §1.3 auth. When AUTH_MODE=keycloak it delegates to the
-// authx RS256/JWKS verifier (H2); otherwise (AUTH_MODE=dev, default) accepts
-// X-Dev-Role: admin|operator|auditor OR a Bearer HS256 dev JWT.
-// Public paths (healthz/readyz and explicitly public routes) bypass it.
-func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
-	// A1-10: PROFILE=prod with dev-mode auth or the default/missing dev
-	// secret must never serve — both are fully forgeable. Fail closed.
-	if ProdAuthMisconfigured() {
-		log.Printf("profile=prod component=auth FAIL-CLOSED: PROFILE=prod with dev AUTH_MODE or default/missing MERIDIAN_DEV_JWT_SECRET; all requests denied")
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				WriteProblem(w, http.StatusServiceUnavailable, "auth_misconfigured",
-					"PROFILE=prod refuses dev auth / default JWT secret; refusing all requests (fail closed)")
-			})
+	authn := authx.Middleware()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StripIdentityHeaders(r)
+		if public[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
 		}
-	}
-	if os.Getenv("AUTH_MODE") == "keycloak" {
-		log.Printf("profile=prod component=auth (keycloak issuer=%s)", os.Getenv("KEYCLOAK_ISSUER"))
-		return authx.Middleware(authx.NewVerifier(authx.ConfigFromEnv()), publicPath)
-	}
-	log.Printf("profile=dev component=auth")
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// B2 #6: X-Meridian-Caller/Roles are only ever stamped by the
-			// authx keycloak middleware from a verified token; in dev mode
-			// that middleware does not run, so strip any client-forged
-			// copies on every path (incl. public paths).
-			r.Header.Del("X-Meridian-Caller")
-			r.Header.Del("X-Meridian-Roles")
-			// R4-S3#1: tenant-asserting headers are likewise only ever
-			// stamped by the authx middleware from a verified token; in dev
-			// mode the X-Dev-Tenant-Id stand-in is honoured instead, so a
-			// client-supplied X-Meridian-Tenant must never pass through.
-			r.Header.Del("X-Meridian-Tenant")
-			r.Header.Del("X-Tenant-ID")
-			if publicPath != nil && publicPath(r.URL.Path) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if role := r.Header.Get("X-Dev-Role"); role == "admin" || role == "operator" || role == "auditor" {
-				next.ServeHTTP(w, r)
-				return
-			}
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer ") {
-				if _, ok := validateHS256(strings.TrimPrefix(auth, "Bearer ")); ok {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-			WriteProblem(w, http.StatusUnauthorized, "unauthorized", "provide X-Dev-Role header or Bearer HS256 dev JWT (AUTH_MODE=dev)")
-		})
-	}
+		authn(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tenant := TenantFromRequest(r, os.Getenv("MERIDIAN_DEFAULT_TENANT"))
+			r.Header.Set("X-Meridian-Tenant", tenant)
+			next.ServeHTTP(w, r)
+		})).ServeHTTP(w, r)
+	})
 }
 
-// RequestIdentity returns the authenticated caller identity for identity-
-// keyed endpoints (device enrolment, commissions): the JWT `sub` claim from
-// an already-validated Bearer token, or — ONLY in AUTH_MODE=dev — the
-// X-Dev-Agent-Id header (dev stand-in for a per-agent principal). Returns ""
-// when no identity can be established.
-func RequestIdentity(r *http.Request) string {
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		if claims, ok := validateHS256(strings.TrimPrefix(auth, "Bearer ")); ok {
-			if sub, _ := claims["sub"].(string); sub != "" {
-				return sub
-			}
+// RequestID stamps/propagates X-Request-ID for log correlation.
+func RequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			id = fmt.Sprintf("req-%d", time.Now().UnixNano())
 		}
-	}
-	if os.Getenv("AUTH_MODE") != "keycloak" {
-		if id := r.Header.Get("X-Dev-Agent-Id"); id != "" {
-			return id // dev-only stand-in; never honoured in prod
-		}
+		w.Header().Set("X-Request-ID", id)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID{}, id)))
+	})
+}
+
+type ctxKeyRequestID struct{}
+
+// RequestIDFromContext returns the request id stamped by RequestID.
+func RequestIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyRequestID{}).(string); ok {
+		return v
 	}
 	return ""
 }
 
-// CallerIdentity returns the authenticated caller's subject across both
-// auth modes: in keycloak mode the authx middleware propagates the verified
-// subject via the X-Meridian-Caller header; otherwise it falls back to
-// RequestIdentity (dev JWT sub / X-Dev-Agent-Id).
-func CallerIdentity(r *http.Request) string {
-	if sub := r.Header.Get("X-Meridian-Caller"); sub != "" {
-		return sub
-	}
-	return RequestIdentity(r)
+// Logging is a minimal access log (method, path, status, duration).
+func Logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		log.Printf("%s %s %d %s rid=%s", r.Method, r.URL.Path, sw.status, time.Since(start), RequestIDFromContext(r.Context()))
+	})
 }
 
-// RequestRoles returns the authenticated caller's roles across both auth
-// modes (audit H-5: object-level authz needs role visibility inside
-// handlers). In keycloak mode the authx middleware propagates the verified
-// roles via the X-Meridian-Roles header (comma-joined); in dev mode the
-// X-Dev-Role header and the HS256 Bearer `roles` claim are honoured.
-func RequestRoles(r *http.Request) []string {
-	if h := r.Header.Get("X-Meridian-Roles"); h != "" {
-		return strings.Split(h, ",")
-	}
-	if os.Getenv("AUTH_MODE") == "keycloak" {
-		return nil
-	}
-	var roles []string
-	if dr := r.Header.Get("X-Dev-Role"); dr != "" {
-		roles = append(roles, dr)
-	}
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		if claims, ok := validateHS256(strings.TrimPrefix(auth, "Bearer ")); ok {
-			if arr, ok := claims["roles"].([]any); ok {
-				for _, v := range arr {
-					if s, ok := v.(string); ok {
-						roles = append(roles, s)
-					}
-				}
-			}
-		}
-	}
-	return roles
+type statusWriter struct {
+	http.ResponseWriter
+	status int
 }
 
-// HasRole reports whether the caller holds the given role.
-func HasRole(r *http.Request, role string) bool {
-	for _, got := range RequestRoles(r) {
-		if got == role {
-			return true
-		}
-	}
-	return false
+func (s *statusWriter) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
 }
 
-// ---- server timeouts + graceful shutdown (QA-04/05/06; mirrors
-// core-platform packages/events/httpx) ----
-
-// ShutdownTimeout bounds graceful shutdown on SIGTERM/SIGINT.
-const ShutdownTimeout = 15 * time.Second
-
-// NewServer builds the standard service server with full timeout defaults
-// (ReadHeaderTimeout alone leaves the body-read path open to slowloris).
-func NewServer(addr string, h http.Handler) *http.Server {
-	return &http.Server{
-		Addr:              addr,
-		Handler:           h,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-}
-
-// Serve runs srv until it fails or a SIGTERM/SIGINT arrives, then drains
-// in-flight requests via http.Server.Shutdown bounded by ShutdownTimeout.
-// A nil error (or http.ErrServerClosed) means a clean shutdown.
-func Serve(srv *http.Server) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	errCh := make(chan error, 1)
+// Shutdown installs SIGINT/SIGTERM handling that gracefully stops srv.
+func Shutdown(srv *http.Server) {
 	go func() {
-		errCh <- srv.ListenAndServe()
-	}()
-	select {
-	case err := <-errCh:
-		if err == http.ErrServerClosed {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		log.Printf("shutdown signal received; draining in-flight requests (timeout %s)", ShutdownTimeout)
-		dctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+		<-ch
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(dctx); err != nil {
-			return fmt.Errorf("graceful shutdown: %w", err)
-		}
-		return nil
-	}
+		_ = srv.Shutdown(ctx)
+	}()
 }
 
-// ListenAndServe runs the server with graceful shutdown on SIGTERM/SIGINT
-// and full timeout defaults.
-func ListenAndServe(addr string, h http.Handler) error {
-	return Serve(NewServer(addr, h))
+// DevHMACToken mints a dev-mode HMAC token (mirrors authx dev issuer) so
+// smoke tests and local tooling can call authenticated endpoints. PROD
+// builds refuse to mint when MERIDIAN_ENV=prod.
+func DevHMACToken(subject, tenant string) (string, error) {
+	if os.Getenv("MERIDIAN_ENV") == "prod" {
+		return "", fmt.Errorf("dev token minting disabled in prod")
+	}
+	secret := os.Getenv("DEV_AUTH_SECRET")
+	if secret == "" {
+		secret = "dev-only-insecure-secret"
+	}
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(
+		`{"sub":%q,"tenant_id":%q,"exp":%d}`, subject, tenant, time.Now().Add(time.Hour).Unix())))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(header + "." + payload))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return header + "." + payload + "." + sig, nil
 }
