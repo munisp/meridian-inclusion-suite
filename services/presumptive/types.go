@@ -25,7 +25,7 @@ type Payment struct {
 	AmountKobo        uint64 `json:"amount_kobo"`
 	Currency          string `json:"currency"` // ISO 4217; locked to NGN at intent (G1)
 	Period            string `json:"period"`   // e.g. "2026" (annual) or "2026-03"
-	Monthly           bool   `json:"monthly,omitempty"` // monthly instalment class
+	Monthly           bool   `json:"monthly,omitempty"` // monthly instalment class (duplicate-levy guard key)
 	Provider          string `json:"provider"` // remita|etranzact|flutterwave|cash_agent
 	Status            string `json:"status"`   // intent|pending_authorisation|authorised|captured_awaiting_post|captured|settled|disputed|charged_back|voided|failed|compensated
 	PendingTransferID string `json:"pending_transfer_id,omitempty"`
