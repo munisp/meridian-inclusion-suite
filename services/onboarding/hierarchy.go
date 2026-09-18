@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/munisp/meridian-inclusion-suite/internal/platform/httpx"
 )
@@ -43,7 +44,15 @@ var (
 )
 
 // Hierarchy manages parent -> sub-agent links over the AgentRegistry.
-type Hierarchy struct{ agents *AgentRegistry }
+//
+// mu serialises Attach: the cycle/depth checks and the parent-link write
+// must be atomic, otherwise two concurrent re-parents (A->B and B->A) each
+// pass the cycle check before either write lands and a 2-cycle is stored
+// (R4-S3#3: check-then-act race -> stored cycle -> unbounded Subtree BFS).
+type Hierarchy struct {
+	agents *AgentRegistry
+	mu     sync.Mutex
+}
 
 func NewHierarchy(agents *AgentRegistry) *Hierarchy { return &Hierarchy{agents: agents} }
 
@@ -128,11 +137,20 @@ func (h *Hierarchy) Subtree(id string) ([]Agent, error) {
 		}
 	}
 	out := []Agent{root}
+	// R4-S3#3 defense-in-depth: a visited set makes the BFS terminate even
+	// if a cycle were ever stored (e.g. written before the Attach mutex
+	// existed); without it the queue never drains and `out` grows until the
+	// service OOMs on every /downline read.
+	visited := map[string]bool{root.ID: true}
 	queue := []Agent{root}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
 		for _, ch := range children[cur.ID] {
+			if visited[ch.ID] {
+				continue
+			}
+			visited[ch.ID] = true
 			out = append(out, ch)
 			queue = append(queue, ch)
 		}
@@ -142,7 +160,14 @@ func (h *Hierarchy) Subtree(id string) ([]Agent, error) {
 
 // Attach links childID under parentID (or detaches when parentID == "").
 // Checks: both agents exist, same tenant, no cycle, depth cap.
+//
+// R4-S3#3: the whole check-then-act (cycle check via Subtree, depth check
+// via Depth, then the Put) runs under h.mu so a concurrent Attach can never
+// interleave between the checks and the write — a cycle can no longer be
+// stored by racing re-parents.
 func (h *Hierarchy) Attach(childID, parentID string) (Agent, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	child, err := h.get(childID)
 	if err != nil {
 		return Agent{}, err
@@ -195,14 +220,28 @@ func subtreeHeight(rootID string, sub []Agent) int {
 			children[ag.ParentID] = append(children[ag.ParentID], ag.ID)
 		}
 	}
+	// R4-S3#3 defense-in-depth (mirrors the Subtree BFS visited set): the
+	// recursion must terminate even on a PRE-EXISTING stored cycle (written
+	// before the Attach mutex existed); without a guard a legacy cycle
+	// recurses forever here and overflows the stack on the next Attach.
+	// `onPath` cuts the current DFS path at a repeated node (returning a
+	// bounded height) while still allowing shared descendants in a diamond
+	// DAG to be counted from every path — so the height stays exact for
+	// acyclic data and merely bounded for corrupted data.
+	onPath := map[string]bool{}
 	var walk func(id string) int
 	walk = func(id string) int {
+		if onPath[id] {
+			return 0 // stored cycle: stop this path instead of overflowing
+		}
+		onPath[id] = true
 		max := 0
 		for _, ch := range children[id] {
 			if d := walk(ch) + 1; d > max {
 				max = d
 			}
 		}
+		delete(onPath, id)
 		return max
 	}
 	return walk(rootID)
