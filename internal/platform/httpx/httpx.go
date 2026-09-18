@@ -76,7 +76,7 @@ func Readyz(check func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if check != nil {
 			if err := check(); err != nil {
-				WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
+				WriteProblem(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
 				return
 			}
 		}
@@ -263,6 +263,12 @@ func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
 			// copies on every path (incl. public paths).
 			r.Header.Del("X-Meridian-Caller")
 			r.Header.Del("X-Meridian-Roles")
+			// R4-S3#1: tenant-asserting headers are likewise only ever
+			// stamped by the authx middleware from a verified token; in dev
+			// mode the X-Dev-Tenant-Id stand-in is honoured instead, so a
+			// client-supplied X-Meridian-Tenant must never pass through.
+			r.Header.Del("X-Meridian-Tenant")
+			r.Header.Del("X-Tenant-ID")
 			if publicPath != nil && publicPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
