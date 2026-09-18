@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -76,7 +77,7 @@ func Readyz(check func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if check != nil {
 			if err := check(); err != nil {
-				WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
+				WriteProblem(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
 				return
 			}
 		}
@@ -186,6 +187,28 @@ func CORS(next http.Handler) http.Handler {
 	})
 }
 
+// ServiceTokenHeader and ServiceNameHeader carry the shared
+// service-to-service credential (R4-S1b#5): internal callers (e.g. the
+// ussd-gateway) authenticate with X-Service-Token instead of forging the
+// X-Dev-Role dev header.
+const ServiceTokenHeader = "X-Service-Token"
+const ServiceNameHeader = "X-Service-Name"
+
+// ValidServiceToken reports whether r carries the configured shared service
+// token (MERIDIAN_SERVICE_TOKEN), compared in constant time. When no token
+// is configured it NEVER matches — fail closed.
+func ValidServiceToken(r *http.Request) bool {
+	want := os.Getenv("MERIDIAN_SERVICE_TOKEN")
+	if want == "" {
+		return false
+	}
+	got := r.Header.Get(ServiceTokenHeader)
+	if got == "" || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 func devSecret() string {
 	if s := os.Getenv("MERIDIAN_DEV_JWT_SECRET"); s != "" {
 		return s
@@ -264,6 +287,14 @@ func Auth(publicPath func(string) bool) func(http.Handler) http.Handler {
 			r.Header.Del("X-Meridian-Caller")
 			r.Header.Del("X-Meridian-Roles")
 			if publicPath != nil && publicPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// R4-S1b#5: a verified shared service token authenticates the
+			// caller as a service principal with operator scope — real
+			// service-to-service authn instead of a forged X-Dev-Role.
+			if ValidServiceToken(r) {
+				r.Header.Set("X-Dev-Role", "operator")
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -370,7 +401,7 @@ func NewServer(addr string, h http.Handler) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		IdleTimeout:      120 * time.Second,
 	}
 }
 
