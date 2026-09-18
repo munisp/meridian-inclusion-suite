@@ -326,7 +326,7 @@ func (s *server) verifyNIN(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		NIN string `json:"nin"`
 	}
-	if err := httpx.DecodeJSON(r, &in); err != nil {
+	if err := httpx.DecodeJSON(r, &in); err != nil || in.NIN == "" {
 		httpx.WriteProblem(w, http.StatusBadRequest, "validation", "nin is required")
 		return
 	}
