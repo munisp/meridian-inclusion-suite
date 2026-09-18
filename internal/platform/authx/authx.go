@@ -8,6 +8,7 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -259,7 +260,7 @@ func (v *Verifier) Verify(token string) (*Claims, error) {
 		return nil, errors.New("authx: token expired or missing exp")
 	}
 	if v.cfg.Audience != "" && !audMatches(c.Audience, v.cfg.Audience) {
-		return nil, errors.New("authx: audience mismatch")
+		return nil, fmt.Errorf("authx: audience mismatch")
 	}
 	c.Roles = realmRoles(claims, v.cfg.Audience)
 	return c, nil
@@ -300,6 +301,21 @@ func StripIdentityHeaders(r *http.Request) {
 	}
 }
 
+// validServiceToken mirrors httpx.ValidServiceToken (kept local to avoid an
+// import cycle): the shared MERIDIAN_SERVICE_TOKEN, constant-time compared,
+// never matching when unconfigured (R4-S1b#5).
+func validServiceToken(r *http.Request) bool {
+	want := os.Getenv("MERIDIAN_SERVICE_TOKEN")
+	if want == "" {
+		return false
+	}
+	got := r.Header.Get("X-Service-Token")
+	if got == "" || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // Middleware returns §1.3 auth middleware for AUTH_MODE=keycloak. publicPath
 // bypasses auth exactly like the dev verifier.
 func Middleware(v *Verifier, publicPath func(string) bool) func(http.Handler) http.Handler {
@@ -309,6 +325,20 @@ func Middleware(v *Verifier, publicPath func(string) bool) func(http.Handler) ht
 			// re-stamped from the verified token below (or stay empty).
 			StripIdentityHeaders(r)
 			if publicPath != nil && publicPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// R4-S1b#5: internal service-to-service callers authenticate
+			// with the shared service token (constant-time, fail-closed
+			// when unconfigured) instead of a Bearer JWT — the stamped
+			// identity is the service name, with operator scope.
+			if validServiceToken(r) {
+				name := r.Header.Get("X-Service-Name")
+				if name == "" {
+					name = "unknown"
+				}
+				r.Header.Set(ClaimsKey, "service:"+name)
+				r.Header.Set(RolesKey, "operator")
 				next.ServeHTTP(w, r)
 				return
 			}
