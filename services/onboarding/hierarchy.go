@@ -38,6 +38,10 @@ import (
 type agentReader interface {
 	Get(id string) (Agent, bool, error)
 	List() ([]Agent, error)
+	// ChildrenOf returns the direct children of parentID via the parent_id
+	// secondary index (perf H2/H3: subtree walks no longer full-scan the
+	// agents table per call).
+	ChildrenOf(parentID string) ([]Agent, error)
 }
 
 // DefaultTenant is assigned to agents registered without an explicit tenant.
@@ -145,16 +149,6 @@ func subtreeOf(r agentReader, id string) ([]Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	all, err := r.List()
-	if err != nil {
-		return nil, err
-	}
-	children := map[string][]Agent{}
-	for _, ag := range all {
-		if ag.ParentID != "" {
-			children[ag.ParentID] = append(children[ag.ParentID], ag)
-		}
-	}
 	out := []Agent{root}
 	// R4-S3#3 defense-in-depth: a visited set makes the BFS terminate even
 	// if a cycle were ever stored (e.g. written before the Attach mutex
@@ -165,7 +159,14 @@ func subtreeOf(r agentReader, id string) ([]Agent, error) {
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for _, ch := range children[cur.ID] {
+		// Perf H2: per-node indexed child lookup (parent_id secondary index)
+		// instead of one full agents-table scan per Subtree call (measured
+		// 93.6 ms @10k agents before).
+		children, err := r.ChildrenOf(cur.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, ch := range children {
 			if visited[ch.ID] {
 				continue
 			}
@@ -268,6 +269,18 @@ func (p pgAgentReader) Get(id string) (Agent, bool, error) {
 func (p pgAgentReader) List() ([]Agent, error) {
 	var out []Agent
 	if err := p.tx.List(p.ctx, "agents", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ChildrenOf reads a node's direct children inside the Attach transaction
+// via the meridian_agents_parent_id expression index (perf H3: the cycle/
+// depth validation no longer full-scans the agents table while holding the
+// FOR UPDATE row locks, so lock hold time no longer grows with table size).
+func (p pgAgentReader) ChildrenOf(parentID string) ([]Agent, error) {
+	var out []Agent
+	if err := p.tx.ListWhere(p.ctx, "agents", "parent_id", parentID, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
