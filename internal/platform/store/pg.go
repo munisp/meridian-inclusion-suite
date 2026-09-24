@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -60,7 +61,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS meridian_payments_levy_uniq ON meridian_docs (
 	'intent', 'pending_authorisation', 'authorised',
 	'captured_awaiting_post', 'capture_in_flight',
 	'captured', 'settled', 'disputed'
-);`
+);
+-- Perf (H1/H2/H4): additive secondary expression indexes backing
+-- Store.ListWhere point queries. All IF NOT EXISTS / additive only.
+CREATE INDEX IF NOT EXISTS meridian_payments_tin_hash ON meridian_docs ((doc->>'tin_hash')) WHERE collection = 'payments';
+CREATE INDEX IF NOT EXISTS meridian_agents_parent_id ON meridian_docs ((doc->>'parent_id')) WHERE collection = 'agents';
+CREATE INDEX IF NOT EXISTS meridian_operators_nin_hash ON meridian_docs ((doc->>'nin_hash')) WHERE collection = 'operators';
+CREATE INDEX IF NOT EXISTS meridian_operators_client_ref ON meridian_docs ((doc->>'client_ref')) WHERE collection = 'operators';`
 
 func (s *Store) pgPut(coll, id string, v any) error {
 	b, err := json.Marshal(v)
@@ -127,22 +134,61 @@ func (s *Store) pgList(coll string, out any) error {
 		return err
 	}
 	defer rows.Close()
-	var raws []json.RawMessage
-	for rows.Next() {
-		var raw json.RawMessage
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		raws = append(raws, raw)
+	return scanDocs(rows, out)
+}
+
+// pgListWhere is the secondary-index point query backing Store.ListWhere on
+// the Postgres backend: served by the per-collection expression indexes in
+// pgDDL instead of a full collection scan + Go-side filter (perf H1/H2/H4).
+func (s *Store) pgListWhere(coll, field, value string, out any) error {
+	if !validDocField(field) {
+		return fmt.Errorf("store: invalid document field %q", field)
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	b, err := json.Marshal(raws)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	rows, err := s.pool.Query(ctx,
+		`SELECT doc FROM meridian_docs WHERE collection=$1 AND doc->>$2=$3`,
+		coll, field, value)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, out)
+	defer rows.Close()
+	return scanDocs(rows, out)
+}
+
+// validDocField guards the one place a field name reaches SQL as a bound
+// parameter (doc->>$2 is already parameterised, so this is defence in depth:
+// restrict to the JSON field-name shape services actually use).
+func validDocField(field string) bool {
+	if field == "" || len(field) > 64 {
+		return false
+	}
+	for _, r := range field {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// scanDocs decodes each row directly into a new slice element — a single
+// JSON pass per document (perf H9: replaces RawMessage -> Marshal ->
+// Unmarshal double round trip on every Postgres list/scan).
+func scanDocs(rows pgx.Rows, out any) error {
+	sv, et, err := sliceTarget(out)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		if err := unmarshalDoc(raw, sv, et); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (s *Store) pgCount(coll string) int {
@@ -173,7 +219,13 @@ func OpenPostgres(dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{pool: pool, data: map[string]map[string]json.RawMessage{}}, nil
+	return &Store{
+		pool:      pool,
+		data:      map[string]map[string]json.RawMessage{},
+		idxFields: map[string][]string{},
+		idx:       map[string]map[string]map[string][]string{},
+		idxByID:   map[string]map[string]map[string]string{},
+	}, nil
 }
 
 // OpenFromEnvProfile selects the storage backend per H1: DATABASE_URL set →
