@@ -357,7 +357,7 @@
     },
     "psm_pay_done": {
       "type": "end",
-      "text": "Payment of N{{levy_naira}} received (ref {{pssp_ref}}).\nCertificate: {{cert_serial}}\nYou will receive an SMS with your certificate serial.\nVerify at /v1/certificates/verify/{{cert_serial}}"
+      "text": "Payment of N{{levy_naira}} received (ref {{pssp_ref}}).\nCertificate: {{cert_serial}}\nSMS follows. Verify: /v1/certificates/verify/{{cert_serial}}"
     },
     "psm_pay_error": {
       "type": "end",
@@ -387,7 +387,7 @@
     },
     "onb_pending": {
       "type": "end",
-      "text": "Registration received, {{name}}.\nYour NIN verification is PENDING REVIEW.\nAn NRS agent will complete your registration. Dial *347*88# option 2 to check status.\nRef: {{operator_id}}"
+      "text": "Registration received, {{name}}.\nNIN verification PENDING REVIEW.\nAn NRS agent will complete it. Dial *347*88# option 2 for status.\nRef: {{operator_id}}"
     }
   }
 }
