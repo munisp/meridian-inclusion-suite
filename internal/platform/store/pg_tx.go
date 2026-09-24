@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -83,22 +84,25 @@ func (t *PgTx) List(ctx context.Context, coll string, out any) error {
 		return err
 	}
 	defer rows.Close()
-	var raws []json.RawMessage
-	for rows.Next() {
-		var raw json.RawMessage
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		raws = append(raws, raw)
+	return scanDocs(rows, out)
+}
+
+// ListWhere decodes the records of coll whose JSON field equals value,
+// inside the transaction (indexed expression query; perf H3: Attach's
+// cycle/depth validation now walks only the relevant child rows instead of
+// full-table scans while holding FOR UPDATE locks).
+func (t *PgTx) ListWhere(ctx context.Context, coll, field, value string, out any) error {
+	if !validDocField(field) {
+		return fmt.Errorf("store: invalid document field %q", field)
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	b, err := json.Marshal(raws)
+	rows, err := t.tx.Query(ctx,
+		`SELECT doc FROM meridian_docs WHERE collection=$1 AND doc->>$2=$3`,
+		coll, field, value)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, out)
+	defer rows.Close()
+	return scanDocs(rows, out)
 }
 
 // Put upserts a document inside the transaction.

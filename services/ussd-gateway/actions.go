@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -213,11 +214,30 @@ func bandName(turnoverKobo uint64) string {
 	}
 }
 
-// httpClient is the shared outbound client (einvoicing/onboarding/psm
-// calls); otelx.Client adds client spans + propagation, no-op when disabled.
-func httpClient() *http.Client {
-	return &http.Client{Timeout: 8 * time.Second, Transport: otelx.Client(nil)}
+// upstreamTimeout bounds one upstream call on the USSD session path. An
+// aggregator session dies after ~20-30 s of silence and a step chains up to
+// 2 calls, so the budget must stay well under that; override via
+// USSD_UPSTREAM_TIMEOUT (Go duration) for slow rails. Default 5s (was 8s).
+func upstreamTimeout() time.Duration {
+	if v := os.Getenv("USSD_UPSTREAM_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 5 * time.Second
 }
+
+// sharedHTTPClient is the process-wide upstream client (perf H7: a fresh
+// http.Client per call built a new Transport every time — no keep-alive
+// reuse, so every USSD step paid a TCP(+TLS) handshake per upstream hop).
+// otelx.Client adds client spans + propagation, no-op when disabled.
+// Timeout is fixed at construction (never mutated per call — a shared
+// client's fields must not race with in-flight requests).
+var sharedHTTPClient = &http.Client{Transport: otelx.Client(nil), Timeout: upstreamTimeout()}
+
+// httpClient returns the shared outbound client (einvoicing/onboarding/psm
+// calls).
+func httpClient() *http.Client { return sharedHTTPClient }
 
 // RegisterActions builds the action handler registry.
 func RegisterActions(bus eventPublisher) map[string]ActionHandler {
@@ -430,15 +450,28 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 					if derr := json.NewDecoder(resp.Body).Decode(&run); derr == nil && run.Status == "completed" && run.Result.Certificate.Serial != "" {
 						sess.Data["cert_serial"] = run.Result.Certificate.Serial
 						sess.Data["pssp_ref"] = run.Result.Payment.PSSPRef
+						sess.Data["payment_mode"] = "live"
 						bus.Publish("nrs.psm.ussd.v1", map[string]any{
-							"flow": "pay", "phone": sess.Phone, "cert_serial": run.Result.Certificate.Serial, "via": "presumptive_svc",
+							"flow": "pay", "phone": sess.Phone, "cert_serial": run.Result.Certificate.Serial, "via": "presumptive_svc", "simulated": false,
 						})
 						return nil
 					}
 				}
 			}
+			// CORRECTNESS (was a silent hazard): a real trigger attempt that
+			// failed must NEVER fall through to the local simulator — a
+			// timeout would mint a simulated certificate for a payment whose
+			// real state is unknown. Fail to the psm_pay_error screen; the
+			// deterministic idempotency key makes a redial safe.
+			log.Printf("psm.pay: presumptive payment trigger FAILED (url configured) phone=%s idem=%s — NOT simulating; safe to redial (idempotent)", sess.Phone, idemKey)
+			sess.Data["payment_mode"] = "unavailable"
+			bus.Publish("nrs.psm.ussd.v1", map[string]any{
+				"flow": "pay", "phone": sess.Phone, "outcome": "trigger_failed", "via": "presumptive_svc", "simulated": false,
+			})
+			return fmt.Errorf("payment service temporarily unavailable; NO charge was confirmed — please redial to retry safely")
 		}
-		// local fallback: simulated authorise->capture + serial. R4-S1b#1:
+		// local fallback (dev standalone only — psmURL unset): simulated
+		// authorise->capture + serial. R4-S1b#1:
 		// the seed is derived from MSISDN+TIN+period+levy (same inputs as
 		// the idempotency key above), NOT the session id, so a redial of
 		// the interrupted session replays the SAME simulated capture and
@@ -446,8 +479,14 @@ func RegisterActions(bus eventPublisher) map[string]ActionHandler {
 		seed := sha256.Sum256([]byte(sess.Phone + "|" + sess.Data["tin_hash"] + "|" + period + "|" + sess.Data["levy_kobo"]))
 		sess.Data["pssp_ref"] = "FLW-" + strings.ToUpper(hex.EncodeToString(seed[:8]))
 		sess.Data["cert_serial"] = fmt.Sprintf("PSM-%d-%s", time.Now().UTC().Year(), strings.ToUpper(hex.EncodeToString(seed[8:13])))
+		// Transparency: the simulated certificate is EXPLICIT — logged, and
+		// flagged in the session + event meta so downstream consumers can
+		// never mistake it for a live capture.
+		sess.Data["payment_mode"] = "simulated"
+		sess.Data["payment_simulated"] = "true"
+		log.Printf("psm.pay: SIMULATED payment (no PRESUMPTIVE_URL configured; dev standalone) phone=%s cert=%s idem=%s", sess.Phone, sess.Data["cert_serial"], idemKey)
 		bus.Publish("nrs.psm.ussd.v1", map[string]any{
-			"flow": "pay", "phone": sess.Phone, "cert_serial": sess.Data["cert_serial"], "via": "local_simulator",
+			"flow": "pay", "phone": sess.Phone, "cert_serial": sess.Data["cert_serial"], "via": "local_simulator", "simulated": true,
 		})
 		return nil
 	}

@@ -6,15 +6,26 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
 // redis.go — minimal RESP (Redis serialization protocol) client used for the
 // USSD session store when REDIS_URL is set (shared, multi-node sessions).
-// REAL code against the Redis protocol; tagged UNVERIFIED here because the
-// test environment has no Redis server — the KV store is the tested default.
+//
+// Perf H8: the client keeps ONE persistent, mutex-multiplexed TCP connection
+// instead of dialling a fresh connection per command (the old code did 3-5
+// handshakes per USSD screen: Get + 1-2xPut + phone index). RESP is strictly
+// request/response, so a single connection guarded by a mutex is correct and
+// removes all per-command dial latency; on any I/O error the connection is
+// dropped and re-established once before the command fails.
 
-type redisClient struct{ addr string }
+type redisClient struct {
+	addr string
+	mu   sync.Mutex
+	conn net.Conn
+	r    *bufio.Reader
+}
 
 func dialRedis(addr string) (*redisClient, error) {
 	c := &redisClient{addr: addr}
@@ -24,23 +35,58 @@ func dialRedis(addr string) (*redisClient, error) {
 	return c, nil
 }
 
-func (c *redisClient) cmd(args ...string) (string, error) {
+// dialLocked (re)opens the persistent connection. Caller holds c.mu.
+func (c *redisClient) dialLocked() error {
 	conn, err := net.DialTimeout("tcp", c.addr, 3*time.Second)
 	if err != nil {
-		return "", err
+		return err
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	c.conn = conn
+	c.r = bufio.NewReader(conn)
+	return nil
+}
+
+// closeLocked drops a broken connection so the next command redials.
+func (c *redisClient) closeLocked() {
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = nil
+	c.r = nil
+}
+
+func (c *redisClient) cmd(args ...string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if c.conn == nil {
+			if err := c.dialLocked(); err != nil {
+				return "", err
+			}
+		}
+		out, err := c.roundTripLocked(args...)
+		if err == nil {
+			return out, nil
+		}
+		// stale/half-open connection: drop it and retry once on a fresh dial
+		lastErr = err
+		c.closeLocked()
+	}
+	return "", fmt.Errorf("redis: command failed after reconnect: %w", lastErr)
+}
+
+func (c *redisClient) roundTripLocked(args ...string) (string, error) {
+	_ = c.conn.SetDeadline(time.Now().Add(3 * time.Second))
 	var b strings.Builder
 	fmt.Fprintf(&b, "*%d\r\n", len(args))
 	for _, a := range args {
 		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
 	}
-	if _, err := conn.Write([]byte(b.String())); err != nil {
+	if _, err := c.conn.Write([]byte(b.String())); err != nil {
 		return "", err
 	}
-	r := bufio.NewReader(conn)
-	line, err := r.ReadString('\n')
+	line, err := c.r.ReadString('\n')
 	if err != nil {
 		return "", err
 	}
@@ -57,7 +103,7 @@ func (c *redisClient) cmd(args ...string) (string, error) {
 			return "", fmt.Errorf("redis: nil")
 		}
 		buf := make([]byte, n+2)
-		if _, err := readFull(r, buf); err != nil {
+		if _, err := readFull(c.r, buf); err != nil {
 			return "", err
 		}
 		return string(buf[:n]), nil

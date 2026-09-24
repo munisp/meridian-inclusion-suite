@@ -155,6 +155,10 @@ type PaymentService struct {
 }
 
 func NewPaymentService(st *store.Store, lc ledger.Client, hub *PSSPHub, eng *BandEngine, gates *GateClient, certs *CertificateService, bus events.Bus) *PaymentService {
+	// Perf H1: findDuplicateLevy is a tin_hash point query, not a full
+	// payments-table scan (embedded: in-memory index; Postgres: the
+	// meridian_payments_tin_hash expression index).
+	st.RegisterIndex("payments", "tin_hash")
 	return &PaymentService{st: st, lc: lc, hub: hub, engine: eng, gates: gates, certs: certs, bus: bus}
 }
 
@@ -217,13 +221,20 @@ var duplicateLevyStatuses = map[string]bool{
 
 // findDuplicateLevy returns the live payment (if any) that already covers
 // (tinHash, period, monthly) — the cross-channel double-pay guard.
+//
+// Perf H1: this was a full payments-table List scan under the CreateIntent
+// mutex (measured 76.6 ms @10k payments, globally serialised). It is now an
+// indexed tin_hash point query (ListWhere) with the period/monthly/status
+// filter applied to the handful of matching rows. The
+// meridian_payments_levy_uniq partial UNIQUE index remains the cross-replica
+// enforcer of last resort (23505 -> 409 at the Put below).
 func (s *PaymentService) findDuplicateLevy(tinHash, period string, monthly bool) (Payment, bool, error) {
-	var all []Payment
-	if err := s.st.List("payments", &all); err != nil {
-		return Payment{}, false, fmt.Errorf("duplicate levy scan: %w", err)
+	var mine []Payment
+	if err := s.st.ListWhere("payments", "tin_hash", tinHash, &mine); err != nil {
+		return Payment{}, false, fmt.Errorf("duplicate levy lookup: %w", err)
 	}
-	for _, p := range all {
-		if p.TINHash == tinHash && p.Period == period && p.Monthly == monthly && duplicateLevyStatuses[p.Status] {
+	for _, p := range mine {
+		if p.Period == period && p.Monthly == monthly && duplicateLevyStatuses[p.Status] {
 			return p, true, nil
 		}
 	}

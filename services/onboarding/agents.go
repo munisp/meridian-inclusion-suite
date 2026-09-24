@@ -43,7 +43,12 @@ var agentVettingTransitions = map[string][]string{
 // AgentRegistry is the agent store.
 type AgentRegistry struct{ st *store.Store }
 
-func NewAgentRegistry(st *store.Store) *AgentRegistry { return &AgentRegistry{st: st} }
+func NewAgentRegistry(st *store.Store) *AgentRegistry {
+	// Perf H2: Hierarchy.Subtree/Attach walk children via the parent_id
+	// secondary index (embedded map / PG expression index), not full scans.
+	st.RegisterIndex("agents", "parent_id")
+	return &AgentRegistry{st: st}
+}
 
 // Register creates an agent in vetting state "pending" with a server-issued id.
 func (a *AgentRegistry) Register(in Agent) (Agent, error) {
@@ -70,6 +75,16 @@ func (a *AgentRegistry) Get(id string) (Agent, bool, error) {
 func (a *AgentRegistry) List() ([]Agent, error) {
 	var out []Agent
 	if err := a.st.List("agents", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ChildrenOf returns the direct children of parentID via the parent_id
+// secondary index (perf H2: O(children), not O(agents)).
+func (a *AgentRegistry) ChildrenOf(parentID string) ([]Agent, error) {
+	var out []Agent
+	if err := a.st.ListWhere("agents", "parent_id", parentID, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

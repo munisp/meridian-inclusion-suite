@@ -14,7 +14,13 @@ type Registry struct {
 	serial uint64
 }
 
-func NewRegistry(st *store.Store) *Registry { return &Registry{st: st, serial: 1000} }
+func NewRegistry(st *store.Store) *Registry {
+	// Perf H4: FindByNINHash / FindByClientRef run on the USSD registration
+	// path — serve them from secondary indexes, not full operator scans.
+	st.RegisterIndex("operators", "nin_hash")
+	st.RegisterIndex("operators", "client_ref")
+	return &Registry{st: st, serial: 1000}
+}
 
 func (r *Registry) nextSerial() uint64 {
 	r.serial++
@@ -58,10 +64,12 @@ func (r *Registry) List() ([]Operator, error) {
 	return ops, nil
 }
 
-// FindByNINHash returns the operator with the given pseudonymised NIN, if any.
+// FindByNINHash returns the operator with the given pseudonymised NIN, if
+// any. Perf H4: indexed point query (was a full operators-table scan per
+// USSD registration, ~76 ms @10k operators).
 func (r *Registry) FindByNINHash(ninHash string) (Operator, bool, error) {
-	ops, err := r.List()
-	if err != nil {
+	var ops []Operator
+	if err := r.st.ListWhere("operators", "nin_hash", ninHash, &ops); err != nil {
 		return Operator{}, false, err
 	}
 	for _, op := range ops {
@@ -73,10 +81,11 @@ func (r *Registry) FindByNINHash(ninHash string) (Operator, bool, error) {
 }
 
 // FindByClientRef finds an operator previously ingested from an agent's
-// client-side reference (idempotent re-sync).
+// client-side reference (idempotent re-sync). Perf H4: indexed client_ref
+// point query; the agent_id filter applies to the (tiny) match set.
 func (r *Registry) FindByClientRef(agentID, clientRef string) (Operator, bool, error) {
-	ops, err := r.List()
-	if err != nil {
+	var ops []Operator
+	if err := r.st.ListWhere("operators", "client_ref", clientRef, &ops); err != nil {
 		return Operator{}, false, err
 	}
 	for _, op := range ops {
