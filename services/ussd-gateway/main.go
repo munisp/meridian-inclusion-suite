@@ -47,6 +47,10 @@ func main() {
 		store = rs
 		log.Printf("profile=prod component=ussd-sessions store=redis addr=%s", addr)
 	} else if kv, err := kvstore.OpenFromEnvProfile(); err == nil {
+		// Perf H5: sessions are volatile (180 s TTL, re-dial safe) — coalesce
+		// the 2-3 Puts per step into one debounced file flush instead of a
+		// full-DB rewrite per Put (measured 9 ms/Put @5k docs before).
+		kv.EnableDebouncedPersistence()
 		store = NewKVSessionStore(kv, graph.SessionTTLSeconds)
 		log.Printf("profile=dev component=ussd-sessions store=embedded-kv (resume enabled)")
 	} else {

@@ -34,6 +34,11 @@ type Menu struct {
 	Action      string       `json:"action,omitempty"`
 	Next        string       `json:"next,omitempty"`
 	ErrorNext   string       `json:"error_next,omitempty"`
+
+	// validateRe is Validate precompiled at LoadMenuGraph (perf H6:
+	// regexp.Compile per user input measured 8.9 µs; a compiled graph pays
+	// it once at startup).
+	validateRe *regexp.Regexp
 }
 
 // MenuOption is one numbered choice.
@@ -59,6 +64,19 @@ func LoadMenuGraph() (*MenuGraph, error) {
 	if g.SessionTTLSeconds == 0 {
 		g.SessionTTLSeconds = 180
 	}
+	// Precompile input validators once (perf H6): a bad pattern now fails
+	// fast at startup instead of surfacing as a per-session config error.
+	for name, m := range g.Menus {
+		if m.Validate == "" {
+			continue
+		}
+		re, err := regexp.Compile(m.Validate)
+		if err != nil {
+			return nil, fmt.Errorf("menus.json: menu %q validate: %w", name, err)
+		}
+		m.validateRe = re
+		g.Menus[name] = m
+	}
 	return &g, nil
 }
 
@@ -75,6 +93,10 @@ func NewEngine(graph *MenuGraph, actions map[string]ActionHandler) *Engine {
 	return &Engine{graph: graph, actions: actions}
 }
 
+// unresolvedPlaceholderRe blanks unresolved {{var}} placeholders in render
+// (perf H6: precompiled once — was a MustCompile on every render call).
+var unresolvedPlaceholderRe = regexp.MustCompile(`\{\{[a-z_]+\}\}`)
+
 // render expands {{var}} templates from session data.
 func render(text string, sess *Session) string {
 	out := text
@@ -82,7 +104,7 @@ func render(text string, sess *Session) string {
 		out = strings.ReplaceAll(out, "{{"+k+"}}", v)
 	}
 	// unresolved placeholders become "-"
-	out = regexp.MustCompile(`\{\{[a-z_]+\}\}`).ReplaceAllString(out, "-")
+	out = unresolvedPlaceholderRe.ReplaceAllString(out, "-")
 	return out
 }
 
@@ -119,9 +141,14 @@ func (e *Engine) Handle(sess *Session, input string) (text string, cont bool, er
 	case "input":
 		val := strings.TrimSpace(input)
 		if menu.Validate != "" {
-			re, rerr := regexp.Compile(menu.Validate)
-			if rerr != nil {
-				return "Configuration error.", false, rerr
+			re := menu.validateRe // precompiled at LoadMenuGraph (perf H6)
+			if re == nil {
+				// graphs constructed programmatically (tests) skip
+				// LoadMenuGraph — compile on first use.
+				var rerr error
+				if re, rerr = regexp.Compile(menu.Validate); rerr != nil {
+					return "Configuration error.", false, rerr
+				}
 			}
 			if !re.MatchString(val) {
 				msg := menu.InvalidText
